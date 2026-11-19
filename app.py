@@ -27,6 +27,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from inventory_agent import InventoryDecisionAgent, AgentResponse
 import inventory_tools as tools
+from inventory_dataset import (
+    validate_inventory_dataset,
+    process_inventory_dataset,
+    REQUIRED_COLUMNS,
+    InventoryDatasetSummary,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +385,49 @@ def main():
         show_charts = st.checkbox("Show Interactive Visualizations", value=True)
         show_json = st.checkbox("Show Raw JSON API Response", value=False)
 
+        # ---------------- CSV Dataset Uploader (Bottom of Sidebar) ----------------
+        st.markdown("---")
+        st.subheader("📂 Upload Inventory Dataset")
+        st.caption("Upload a CSV dataset containing inventory records.")
+
+        uploaded_csv = st.file_uploader(
+            "Upload inventory CSV:",
+            type=["csv"],
+            key="sidebar_csv_uploader",
+            help="Upload an inventory CSV file. Must contain: Product, Category, Units, Unit Cost."
+        )
+
+        clean_dataset_df = None
+        dataset_summary = None
+
+        if uploaded_csv is not None:
+            try:
+                raw_df = pd.read_csv(uploaded_csv)
+                is_valid, missing_cols = validate_inventory_dataset(raw_df)
+                if not is_valid:
+                    st.error(f"❌ Missing required column(s): **{', '.join(missing_cols)}**")
+                    st.info(f"Required columns: {', '.join(REQUIRED_COLUMNS)}")
+                else:
+                    clean_dataset_df, dataset_summary = process_inventory_dataset(raw_df)
+                    st.success("✅ Dataset Validated Successfully")
+
+                    if dataset_summary.warnings:
+                        for w in dataset_summary.warnings:
+                            st.warning(f"⚠️ {w}")
+
+                    # Sidebar Descriptive Summary
+                    st.markdown("**Descriptive Summary:**")
+                    st.markdown(f"- **Products**: {dataset_summary.num_products:,}")
+                    st.markdown(f"- **Total Units**: {dataset_summary.total_units:,.0f}")
+                    st.markdown(f"- **Total Inventory Value**: **${dataset_summary.total_inventory_value:,.2f}**")
+                    st.markdown(f"- **Categories**: {dataset_summary.num_categories}")
+
+                    with st.expander("👀 Sidebar Dataset Preview", expanded=False):
+                        st.dataframe(clean_dataset_df.head(5), use_container_width=True)
+
+            except Exception as e:
+                st.error(f"❌ CSV Processing Error: {str(e)}")
+
     # ---------------- Header ----------------
     st.markdown("""
     <div style="background: linear-gradient(90deg, #1E3C72 0%, #2A5298 100%); padding: 22px 28px; border-radius: 10px; color: white; margin-bottom: 24px;">
@@ -404,9 +453,10 @@ def main():
     """, unsafe_allow_html=True)
 
     # Main Tabs
-    tab_agent, tab_manual, tab_reference = st.tabs([
+    tab_agent, tab_manual, tab_dataset, tab_reference = st.tabs([
         "💬 Natural Language Agent",
         "🎛️ Interactive Parameter Calculator",
+        "📊 Uploaded Inventory Dataset",
         "📚 Mathematical Formulations Reference"
     ])
 
@@ -652,7 +702,89 @@ def main():
                 render_verifiable_solution(nv_res)
 
     # =========================================================================
-    # TAB 3: Mathematical Formulations Reference
+    # TAB 3: Uploaded Inventory Dataset & Descriptive Analysis
+    # =========================================================================
+    with tab_dataset:
+        st.markdown("### 📊 Uploaded Inventory Dataset & Descriptive Analysis")
+
+        if clean_dataset_df is not None and dataset_summary is not None:
+            st.success("✅ Dataset successfully loaded and validated against the required schema.")
+
+            # Descriptive Analysis KPI Cards
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Total Products", f"{dataset_summary.num_products:,}", "Distinct SKUs")
+            k2.metric("Total Units", f"{dataset_summary.total_units:,.0f}", "Aggregate inventory units")
+            k3.metric("Total Inventory Value", f"${dataset_summary.total_inventory_value:,.2f}", "Units × Unit Cost")
+            k4.metric("Product Categories", f"{dataset_summary.num_categories}", f"Avg Unit Cost: ${dataset_summary.avg_unit_cost:,.2f}")
+
+            if dataset_summary.warnings:
+                st.markdown("##### ⚠️ Data Cleaning Notices")
+                for w in dataset_summary.warnings:
+                    st.warning(w)
+
+            # Dataset Preview with Inventory Value
+            st.markdown("#### 📋 Dataset Preview (with calculated Inventory Value = Units × Unit Cost)")
+            st.dataframe(
+                clean_dataset_df.style.format({
+                    "Units": "{:,.0f}",
+                    "Unit Cost": "${:,.2f}",
+                    "Inventory Value": "${:,.2f}",
+                }),
+                use_container_width=True,
+                height=350,
+            )
+
+            # Category-Level Descriptive Breakdown
+            st.markdown("#### 🏷️ Category-Level Descriptive Breakdown")
+            cat_summary = clean_dataset_df.groupby("Category").agg(
+                Products=("Product", "nunique"),
+                Total_Units=("Units", "sum"),
+                Total_Inventory_Value=("Inventory Value", "sum"),
+                Avg_Unit_Cost=("Unit Cost", "mean")
+            ).reset_index()
+
+            cat_summary["% Total Value"] = (cat_summary["Total_Inventory_Value"] / dataset_summary.total_inventory_value) * 100
+            st.dataframe(
+                cat_summary.style.format({
+                    "Total_Units": "{:,.0f}",
+                    "Total_Inventory_Value": "${:,.2f}",
+                    "Avg_Unit_Cost": "${:,.2f}",
+                    "% Total Value": "{:.1f}%",
+                }),
+                use_container_width=True,
+            )
+
+        else:
+            st.info("👈 **No dataset currently loaded.** Upload a CSV inventory dataset using the file uploader at the bottom of the sidebar.")
+            st.markdown("""
+            **Required CSV Schema:**
+            Your dataset must contain the following 4 columns:
+            1. **`Product`**: Product name or SKU code
+            2. **`Category`**: Product or inventory category
+            3. **`Units`**: Non-negative integer or float quantity
+            4. **`Unit Cost`**: Non-negative unit acquisition or production cost
+            """)
+
+            # Sample Template Table
+            st.markdown("##### 📝 Expected CSV Format Preview:")
+            sample_df = pd.DataFrame([
+                {"Product": "SKU-1001", "Category": "Electronics", "Units": 150, "Unit Cost": 45.00},
+                {"Product": "SKU-1002", "Category": "Hardware", "Units": 500, "Unit Cost": 8.50},
+                {"Product": "SKU-1003", "Category": "Office Supplies", "Units": 1200, "Unit Cost": 2.25},
+                {"Product": "SKU-1004", "Category": "Electronics", "Units": 80, "Unit Cost": 120.00},
+            ])
+            sample_df["Inventory Value"] = sample_df["Units"] * sample_df["Unit Cost"]
+            st.dataframe(
+                sample_df.style.format({
+                    "Units": "{:,.0f}",
+                    "Unit Cost": "${:,.2f}",
+                    "Inventory Value": "${:,.2f}",
+                }),
+                use_container_width=True,
+            )
+
+    # =========================================================================
+    # TAB 4: Mathematical Formulations Reference
     # =========================================================================
     with tab_reference:
         st.markdown("### 📚 Operations Research Mathematical Cheat-Sheet")

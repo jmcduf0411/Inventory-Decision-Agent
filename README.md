@@ -78,7 +78,13 @@ The web application will open in your default browser at:
      - **Newsvendor**: Marginal underage ($C_u$) vs overage ($C_o$) cost comparison and expected profit payoffs.
 2. **Interactive Parameter Calculator Tab**:
    - Direct manual slider and numerical inputs for all 5 models to test "what-if" parameter sensitivities.
-3. **Mathematical Formulations Reference Tab**:
+3. **Uploaded Inventory Dataset Tab & Sidebar Uploader**:
+   - CSV file uploader located at the bottom of the sidebar.
+   - Validates schema columns: `Product`, `Category`, `Units`, `Unit Cost`.
+   - Cleans formatting (currency symbols, commas) and removes invalid non-numeric/negative records with descriptive warnings.
+   - Computes `Inventory Value = Units * Unit Cost`.
+   - Descriptive summary KPI cards (Total Products, Total Units, Total Inventory Value, Product Categories, Average Unit Cost) and category-level breakdown tables.
+4. **Mathematical Formulations Reference Tab**:
    - Complete operations research cheat-sheet with LaTeX formulas.
 
 ---
@@ -88,5 +94,5 @@ The web application will open in your default browser at:
 To run the full automated test suite:
 
 ```powershell
-pytest tests/test_inventory_tools.py -v
+pytest tests/ -v
 ```
