@@ -27,18 +27,53 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from inventory_agent import InventoryDecisionAgent, AgentResponse
 import inventory_tools as tools
-from inventory_dataset import (
-    validate_inventory_dataset,
-    validate_classification_dataset,
-    detect_dataset_schema,
-    process_inventory_dataset,
-    classify_inventory_multicriteria,
-    normalize_column_names,
-    REQUIRED_COLUMNS,
-    CLASSIFICATION_REQUIRED_COLUMNS,
-    InventoryDatasetSummary,
-    MulticriteriaClassificationSummary,
-)
+
+try:
+    from inventory_dataset import (
+        validate_inventory_dataset,
+        validate_classification_dataset,
+        detect_dataset_schema,
+        process_inventory_dataset,
+        classify_inventory_multicriteria,
+        normalize_column_names,
+        REQUIRED_COLUMNS,
+        CLASSIFICATION_REQUIRED_COLUMNS,
+        InventoryDatasetSummary,
+        MulticriteriaClassificationSummary,
+    )
+except ImportError:
+    # Graceful defensive fallback in case inventory_dataset.py on GitHub is an older revision
+    import inventory_dataset as _inv
+    validate_inventory_dataset = getattr(_inv, "validate_inventory_dataset", None)
+    process_inventory_dataset = getattr(_inv, "process_inventory_dataset", None)
+    normalize_column_names = getattr(_inv, "normalize_column_names", lambda df: df)
+    REQUIRED_COLUMNS = getattr(_inv, "REQUIRED_COLUMNS", ["Product", "Category", "Units", "Unit Cost"])
+    CLASSIFICATION_REQUIRED_COLUMNS = getattr(
+        _inv, "CLASSIFICATION_REQUIRED_COLUMNS", ["Item Number", "Item Name", "UoM", "Sales ($)", "Hits"]
+    )
+    InventoryDatasetSummary = getattr(_inv, "InventoryDatasetSummary", None)
+    MulticriteriaClassificationSummary = getattr(_inv, "MulticriteriaClassificationSummary", None)
+    classify_inventory_multicriteria = getattr(_inv, "classify_inventory_multicriteria", None)
+
+    def validate_classification_dataset(df: pd.DataFrame):
+        func = getattr(_inv, "validate_classification_dataset", None)
+        if func is not None:
+            return func(df)
+        norm = normalize_column_names(df) if normalize_column_names else df
+        missing = [c for c in CLASSIFICATION_REQUIRED_COLUMNS if c not in norm.columns]
+        return len(missing) == 0, missing
+
+    def detect_dataset_schema(df: pd.DataFrame) -> str:
+        func = getattr(_inv, "detect_dataset_schema", None)
+        if func is not None:
+            return func(df)
+        norm = normalize_column_names(df) if normalize_column_names else df
+        cols = set(norm.columns)
+        if set(CLASSIFICATION_REQUIRED_COLUMNS).issubset(cols):
+            return "classification"
+        if set(REQUIRED_COLUMNS).issubset(cols):
+            return "valuation"
+        return "unknown"
 
 
 # ---------------------------------------------------------------------------

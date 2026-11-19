@@ -44,6 +44,25 @@ import io
 import pandas as pd
 import numpy as np
 
+__all__ = [
+    "REQUIRED_COLUMNS",
+    "CLASSIFICATION_REQUIRED_COLUMNS",
+    "TIER_SCORES",
+    "CLASS_STRATEGIES",
+    "InventoryDatasetSummary",
+    "MulticriteriaClassSummary",
+    "MulticriteriaClassificationSummary",
+    "normalize_column_names",
+    "validate_inventory_dataset",
+    "validate_classification_dataset",
+    "detect_dataset_schema",
+    "clean_numeric_series",
+    "assign_pareto_tier",
+    "assign_final_class_from_score",
+    "classify_inventory_multicriteria",
+    "process_inventory_dataset",
+    "load_inventory_csv_from_bytes",
+]
 
 # Canonical required columns for both supported CSV schemas
 REQUIRED_COLUMNS = ["Product", "Category", "Units", "Unit Cost"]
