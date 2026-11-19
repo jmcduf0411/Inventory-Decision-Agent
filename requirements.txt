@@ -1,0 +1,8 @@
+# Supply Chain Analytics Inventory Decision Agent Dependencies
+# Streamlit web application and testing suite
+
+streamlit>=1.30.0
+pytest>=7.4.0
+tabulate>=0.9.0
+pandas>=1.5.0
+altair>=5.0.0
