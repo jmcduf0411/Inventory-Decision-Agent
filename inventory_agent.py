@@ -243,6 +243,59 @@ class InputExtractor:
         return None
 
     @classmethod
+    def extract_unit_purchase_cost(cls, text: str) -> Optional[float]:
+        """
+        Extracts unit purchase price / cost (C) while strictly ensuring that
+        holding costs ($/unit/year, $/unit annually) or ordering costs ($/order)
+        are NEVER falsely extracted as unit purchase price.
+        """
+        # Priority 1: Highly specific purchase price patterns
+        specific_patterns = [
+            r'(?:unit\s+purchase\s+(?:price|cost)|unit\s+purchase\s+cost|purchase\s+price|purchase\s+cost|wholesale\s+price)\s*(?:is|of|[:=]|about)?\s*\$?([0-9,]+(?:\.[0-9]+)?)',
+            r'unit_cost[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
+            r'\b[cC]\s*[:=]\s*\$?([0-9,]+(?:\.[0-9]+)?)',
+            r'(?:each\s+(?:unit|item)\s+costs?|items?\s+costs?|product\s+costs?)\s*\$?([0-9,]+(?:\.[0-9]+)?)(?!\s*(?:%|per\s+order|per\s+year|annually|/\s*year))',
+            r'(?:buy|purchase)\s+(?:each\s+unit|each\s+item|units?|items?)\s*(?:for|at)\s*\$?([0-9,]+(?:\.[0-9]+)?)',
+        ]
+        for pat in specific_patterns:
+            match = re.search(pat, text, re.IGNORECASE)
+            if match:
+                try:
+                    return float(match.group(1).replace(",", ""))
+                except ValueError:
+                    pass
+
+        # Priority 2: Clause-level fallback. Split text into logical clauses.
+        clauses = re.split(r'[,;.\n]|\band\b', text, flags=re.IGNORECASE)
+        for clause in clauses:
+            c_low = clause.lower()
+            # Strictly ignore clauses containing holding/carrying/storage/annual parameters
+            if any(w in c_low for w in ["holding", "carrying", "storage", "per unit per year", "/ unit / year", "/unit/year", "per unit annually", "/ unit annually", "/unit annually"]):
+                continue
+            # Strictly ignore clauses containing ordering/setup cost terms
+            if any(w in c_low for w in ["order cost", "ordering cost", "setup cost", "setup expense", "per order", "/ order", "/order", "placing an order"]):
+                continue
+            # Strictly ignore clauses describing demand or volume
+            if any(w in c_low for w in ["demand", "sells", "sales", "requires", "consumes"]):
+                continue
+
+            # Within a clean clause that does NOT talk about holding or ordering:
+            clause_patterns = [
+                r'(?:unit\s+cost|cost\s+per\s+unit|item\s+cost)\s*(?:is|of|[:=]|about)?\s*\$?([0-9,]+(?:\.[0-9]+)?)(?!\s*(?:%|per\s+year|annually|/\s*year))',
+                r'(?:costs?|buy\s+at|purchased?\s+at)\s*\$?([0-9,]+(?:\.[0-9]+)?)\s*(?:per\s+unit|/\s*unit|each)(?!\s*(?:per\s+year|annually|/\s*year))',
+                r'\$?([0-9,]+(?:\.[0-9]+)?)\s*(?:per\s+unit|/\s*unit|each)(?!\s*(?:per\s+year|annually|/\s*year|per\s+order|/\s*order))',
+            ]
+            for pat in clause_patterns:
+                match = re.search(pat, clause, re.IGNORECASE)
+                if match:
+                    try:
+                        return float(match.group(1).replace(",", ""))
+                    except ValueError:
+                        pass
+
+        return None
+
+    @classmethod
     def extract_discount_tiers(cls, text: str) -> List[Tuple[float, Optional[float], float]]:
         """
         Parses discount tiers such as:
@@ -346,14 +399,8 @@ class InputExtractor:
                         if h is not None or rate is not None:
                             break
 
-            # 4. Unit purchase price C
-            c = cls.extract_numbers_after(question, [
-                r'(?:unit\s+purchase\s+(?:cost|price)|unit\s+purchase\s+cost|purchase\s+price|unit\s+cost|cost\s+per\s+unit|purchase\s+cost|item\s+costs?|wholesale\s+price)\s*(?:is|of|[:=]|about)?\s*\$?([0-9,]+(?:\.[0-9]+)?)',
-                r'\$?([0-9,]+(?:\.[0-9]+)?)\s*(?:per\s+unit|/\s*unit|each\s+cost|unit\s+purchase)',
-                r'(?:costs?|buy\s+at)\s*\$?([0-9,]+(?:\.[0-9]+)?)\s*(?:per\s+unit|/\s*unit|each)',
-                r'unit_cost[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'\b[cC]\s*[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
-            ])
+            # 4. Unit purchase price C (strictly separate from holding cost $/unit/year)
+            c = cls.extract_unit_purchase_cost(question)
 
             # 5. Working days
             w = cls.extract_numbers_after(question, [
@@ -1025,6 +1072,8 @@ class Explainer:
             for ik, iv in getattr(result, "intermediate_calculations", {}).items():
                 if ik == "tier_step_by_step":
                     continue  # Table already provided in tier comparison
+                if iv is None:
+                    continue  # Skip uncalculated/unspecified parameters (e.g. annual_purchase_cost when C is omitted)
                 if isinstance(iv, float):
                     lines.append(f"- **{ik}**: {iv:,.4f}")
                 else:

@@ -315,7 +315,7 @@ def render_verifiable_solution(res: Any):
         st.markdown("**5. Intermediate Calculations**")
         inter_rows = []
         for ik, iv in getattr(res, "intermediate_calculations", {}).items():
-            if ik != "tier_step_by_step":
+            if ik != "tier_step_by_step" and iv is not None:
                 inter_rows.append({"Step / Metric": ik, "Value": f"{iv:,.4f}" if isinstance(iv, float) else str(iv)})
         st.dataframe(pd.DataFrame(inter_rows), hide_index=True, use_container_width=True)
 

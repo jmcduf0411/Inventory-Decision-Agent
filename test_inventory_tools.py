@@ -396,6 +396,57 @@ class TestInventoryDecisionAgentIntegration:
         assert resp.identified_model == "eoq"
         assert resp.raw_result.final_answer == 775
 
+    def test_eoq_holding_cost_not_extracted_as_unit_purchase_cost_regression(self, agent):
+        """
+        Regression Test:
+        'Our annual demand is 12,000 units. Ordering cost is $100 per order, and holding cost is $4 per unit per year.
+         What is our optimal order quantity and how often should we place orders?'
+
+        Holding cost ($4 per unit per year) must NOT be extracted as Unit Purchase Cost (C).
+        Since purchase price is unspecified:
+        - 'unit_cost' must not be in extracted_inputs
+        - raw_result.unit_purchase_cost must be None
+        - raw_result.annual_purchase_cost must be None
+        - total_annual_cost must equal annual_inventory_cost (holding + ordering)
+        - EOQ = 774.60 exact -> final_answer = 775
+        - All 8 verification components must be present
+        """
+        q = (
+            "Our annual demand is 12,000 units. Ordering cost is $100 per order, "
+            "and holding cost is $4 per unit per year. "
+            "What is our optimal order quantity and how often should we place orders?"
+        )
+        resp = agent.ask(q)
+        assert resp.success is True
+        assert resp.identified_model == "eoq"
+        assert resp.extracted_inputs["demand"] == 12000.0
+        assert resp.extracted_inputs["order_cost"] == 100.0
+        assert resp.extracted_inputs["holding_cost"] == 4.0
+        assert "unit_cost" not in resp.extracted_inputs, "Holding cost was incorrectly extracted as unit_cost!"
+
+        res = resp.raw_result
+        assert res.unit_purchase_cost is None
+        assert res.annual_purchase_cost is None
+        assert pytest.approx(res.optimal_order_quantity, rel=1e-3) == 774.597
+        assert res.final_answer == 775
+        assert res.recommended_order_quantity == 775
+        assert pytest.approx(res.annual_ordering_cost, rel=1e-2) == 1549.19
+        assert pytest.approx(res.annual_holding_cost, rel=1e-2) == 1549.19
+        assert pytest.approx(res.annual_inventory_cost, rel=1e-2) == 3098.39
+        assert res.total_annual_cost == res.annual_inventory_cost
+
+        # Verify all 8 components
+        assert "Unit Purchase Cost (C)" not in res.inputs_extracted
+        assert res.inputs_extracted["Annual Demand (D)"] == 12000.0
+        assert res.inputs_extracted["Holding Cost per Unit (H)"] == 4.0
+        assert "Q*" in res.variable_definitions
+        assert "sqrt((2 * D * S) / H)" in res.formula
+        assert "12000" in res.formula_substituted
+        assert "exact_optimal_q" in res.intermediate_calculations
+        assert res.final_answer == 775
+        assert len(res.verification_checks) >= 3
+        assert len(res.assumptions) >= 5
+
     def test_agent_quantity_discount(self, agent):
         q = "Annual demand 5000, order cost $49, holding rate 20%. Tiers: 1-999: $5.00, 1000-1999: $4.80, 2000+: $4.75."
         resp = agent.ask(q)
