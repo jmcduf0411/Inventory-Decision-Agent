@@ -78,12 +78,27 @@ The web application will open in your default browser at:
      - **Newsvendor**: Marginal underage ($C_u$) vs overage ($C_o$) cost comparison and expected profit payoffs.
 2. **Interactive Parameter Calculator Tab**:
    - Direct manual slider and numerical inputs for all 5 models to test "what-if" parameter sensitivities.
-3. **Uploaded Inventory Dataset Tab & Sidebar Uploader**:
-   - CSV file uploader located at the bottom of the sidebar.
-   - Validates schema columns: `Product`, `Category`, `Units`, `Unit Cost`.
-   - Cleans formatting (currency symbols, commas) and removes invalid non-numeric/negative records with descriptive warnings.
-   - Computes `Inventory Value = Units * Unit Cost`.
-   - Descriptive summary KPI cards (Total Products, Total Units, Total Inventory Value, Product Categories, Average Unit Cost) and category-level breakdown tables.
+3. **Uploaded Inventory Dataset & Classification Tab**:
+   - Single CSV file uploader located at the bottom of the sidebar.
+   - **BAN 517 Multicriteria Classification Mode**:
+     - Requires columns: `Item Number`, `Item Name`, `UoM`, `Sales ($)`, `Hits`.
+     - **Step 1**: Independently ranks Sales and Hits with Pareto thresholds:
+       - Class A (Score 4): 0–60% cumulative contribution
+       - Class B (Score 3): 61–80% cumulative contribution
+       - Class C (Score 2): 81–90% cumulative contribution
+       - Class D (Score 1): 91–100% cumulative contribution
+     - **Step 2**: Computes Combined Weighted Score:
+       $$\text{Weighted Score} = 0.65 \times \text{Sales Score} + 0.35 \times \text{Hits Score}$$
+     - **Step 3**: Assigns Final Inventory Class:
+       - Class A: 3.25 – 4.00
+       - Class B: 2.50 – < 3.25
+       - Class C: 1.75 – < 2.50
+       - Class D: < 1.75
+     - Generates enriched DataFrame with both criteria's cumulative percentages, individual classes, scores, weighted score, and final class, alongside class counts and total sales summaries.
+   - **Inventory Valuation Mode**:
+     - Requires columns: `Product`, `Category`, `Units`, `Unit Cost`.
+     - Cleans formatting (currency symbols, commas) and computes `Inventory Value = Units * Unit Cost`.
+     - Descriptive summary KPI cards (Total Products, Total Units, Total Inventory Value, Product Categories, Average Unit Cost) and category-level breakdown tables.
 4. **Mathematical Formulations Reference Tab**:
    - Complete operations research cheat-sheet with LaTeX formulas.
 

@@ -29,9 +29,15 @@ from inventory_agent import InventoryDecisionAgent, AgentResponse
 import inventory_tools as tools
 from inventory_dataset import (
     validate_inventory_dataset,
+    validate_classification_dataset,
+    detect_dataset_schema,
     process_inventory_dataset,
+    classify_inventory_multicriteria,
+    normalize_column_names,
     REQUIRED_COLUMNS,
+    CLASSIFICATION_REQUIRED_COLUMNS,
     InventoryDatasetSummary,
+    MulticriteriaClassificationSummary,
 )
 
 
@@ -388,34 +394,55 @@ def main():
         # ---------------- CSV Dataset Uploader (Bottom of Sidebar) ----------------
         st.markdown("---")
         st.subheader("📂 Upload Inventory Dataset")
-        st.caption("Upload a CSV dataset containing inventory records.")
+        st.caption("Upload a CSV dataset for multicriteria classification (A/B/C/D) or inventory valuation.")
 
         uploaded_csv = st.file_uploader(
             "Upload inventory CSV:",
             type=["csv"],
             key="sidebar_csv_uploader",
-            help="Upload an inventory CSV file. Must contain: Product, Category, Units, Unit Cost."
+            help="Supports:\n1. Multicriteria Classification: Item Number, Item Name, UoM, Sales ($), Hits\n2. Inventory Valuation: Product, Category, Units, Unit Cost"
         )
 
+        dataset_type = None
         clean_dataset_df = None
         dataset_summary = None
 
         if uploaded_csv is not None:
             try:
                 raw_df = pd.read_csv(uploaded_csv)
-                is_valid, missing_cols = validate_inventory_dataset(raw_df)
-                if not is_valid:
-                    st.error(f"❌ Missing required column(s): **{', '.join(missing_cols)}**")
-                    st.info(f"Required columns: {', '.join(REQUIRED_COLUMNS)}")
-                else:
-                    clean_dataset_df, dataset_summary = process_inventory_dataset(raw_df)
-                    st.success("✅ Dataset Validated Successfully")
+                dataset_type = detect_dataset_schema(raw_df)
+
+                if dataset_type == "classification":
+                    clean_dataset_df, dataset_summary = classify_inventory_multicriteria(raw_df)
+                    st.success("✅ Classification Dataset Validated")
 
                     if dataset_summary.warnings:
                         for w in dataset_summary.warnings:
                             st.warning(f"⚠️ {w}")
 
-                    # Sidebar Descriptive Summary
+                    # Sidebar Classification Summary
+                    b = dataset_summary.class_breakdown
+                    st.markdown("**Classification Summary:**")
+                    st.markdown(f"- **Total Items**: {dataset_summary.total_items:,}")
+                    st.markdown(f"- **Total Sales**: **${dataset_summary.total_sales:,.2f}**")
+                    st.markdown(f"- **Total Hits**: {dataset_summary.total_hits:,.0f}")
+                    st.markdown(f"- **Class A**: {b['A'].item_count} items ({b['A'].pct_items:.1f}%) | ${b['A'].total_sales:,.2f}")
+                    st.markdown(f"- **Class B**: {b['B'].item_count} items ({b['B'].pct_items:.1f}%) | ${b['B'].total_sales:,.2f}")
+                    st.markdown(f"- **Class C**: {b['C'].item_count} items ({b['C'].pct_items:.1f}%) | ${b['C'].total_sales:,.2f}")
+                    st.markdown(f"- **Class D**: {b['D'].item_count} items ({b['D'].pct_items:.1f}%) | ${b['D'].total_sales:,.2f}")
+
+                    with st.expander("👀 Sidebar Dataset Preview", expanded=False):
+                        st.dataframe(clean_dataset_df[["Item Number", "Item Name", "Sales ($)", "Hits", "Weighted Score", "Final Inventory Class"]].head(5), use_container_width=True)
+
+                elif dataset_type == "valuation":
+                    clean_dataset_df, dataset_summary = process_inventory_dataset(raw_df)
+                    st.success("✅ Valuation Dataset Validated")
+
+                    if dataset_summary.warnings:
+                        for w in dataset_summary.warnings:
+                            st.warning(f"⚠️ {w}")
+
+                    # Sidebar Valuation Summary
                     st.markdown("**Descriptive Summary:**")
                     st.markdown(f"- **Products**: {dataset_summary.num_products:,}")
                     st.markdown(f"- **Total Units**: {dataset_summary.total_units:,.0f}")
@@ -424,6 +451,17 @@ def main():
 
                     with st.expander("👀 Sidebar Dataset Preview", expanded=False):
                         st.dataframe(clean_dataset_df.head(5), use_container_width=True)
+
+                else:
+                    norm = normalize_column_names(raw_df)
+                    _, missing_cls = validate_classification_dataset(norm)
+                    _, missing_val = validate_inventory_dataset(norm)
+                    st.error("❌ CSV columns do not match a supported inventory schema.")
+                    st.info(
+                        f"Expected for Classification: {', '.join(CLASSIFICATION_REQUIRED_COLUMNS)}\n\n"
+                        f"Missing: {', '.join(missing_cls)}\n\n"
+                        f"Or for Valuation: {', '.join(REQUIRED_COLUMNS)}"
+                    )
 
             except Exception as e:
                 st.error(f"❌ CSV Processing Error: {str(e)}")
@@ -702,86 +740,242 @@ def main():
                 render_verifiable_solution(nv_res)
 
     # =========================================================================
-    # TAB 3: Uploaded Inventory Dataset & Descriptive Analysis
+    # TAB 3: Uploaded Inventory Dataset & Analysis
     # =========================================================================
     with tab_dataset:
-        st.markdown("### 📊 Uploaded Inventory Dataset & Descriptive Analysis")
+        st.markdown("### 📊 Uploaded Inventory Dataset & Analysis")
 
         if clean_dataset_df is not None and dataset_summary is not None:
-            st.success("✅ Dataset successfully loaded and validated against the required schema.")
+            if dataset_type == "classification" and isinstance(dataset_summary, MulticriteriaClassificationSummary):
+                st.success("✅ Inventory classification dataset successfully loaded and classified into Classes A, B, C, and D.")
 
-            # Descriptive Analysis KPI Cards
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Total Products", f"{dataset_summary.num_products:,}", "Distinct SKUs")
-            k2.metric("Total Units", f"{dataset_summary.total_units:,.0f}", "Aggregate inventory units")
-            k3.metric("Total Inventory Value", f"${dataset_summary.total_inventory_value:,.2f}", "Units × Unit Cost")
-            k4.metric("Product Categories", f"{dataset_summary.num_categories}", f"Avg Unit Cost: ${dataset_summary.avg_unit_cost:,.2f}")
+                # Top KPI Cards for Classes A, B, C, D
+                b = dataset_summary.class_breakdown
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric(
+                    "Class A (Crown Jewels)",
+                    f"{b['A'].item_count:,} items ({b['A'].pct_items:.1f}%)",
+                    f"${b['A'].total_sales:,.0f} ({b['A'].pct_sales:.1f}% Sales | {b['A'].pct_hits:.1f}% Hits)"
+                )
+                k2.metric(
+                    "Class B (Standard)",
+                    f"{b['B'].item_count:,} items ({b['B'].pct_items:.1f}%)",
+                    f"${b['B'].total_sales:,.0f} ({b['B'].pct_sales:.1f}% Sales | {b['B'].pct_hits:.1f}% Hits)"
+                )
+                k3.metric(
+                    "Class C (Slow Moving)",
+                    f"{b['C'].item_count:,} items ({b['C'].pct_items:.1f}%)",
+                    f"${b['C'].total_sales:,.0f} ({b['C'].pct_sales:.1f}% Sales | {b['C'].pct_hits:.1f}% Hits)"
+                )
+                k4.metric(
+                    "Class D (Non-Movers)",
+                    f"{b['D'].item_count:,} items ({b['D'].pct_items:.1f}%)",
+                    f"${b['D'].total_sales:,.0f} ({b['D'].pct_sales:.1f}% Sales | {b['D'].pct_hits:.1f}% Hits)"
+                )
 
-            if dataset_summary.warnings:
-                st.markdown("##### ⚠️ Data Cleaning Notices")
-                for w in dataset_summary.warnings:
-                    st.warning(w)
+                if dataset_summary.warnings:
+                    st.markdown("##### ⚠️ Data Cleaning Notices")
+                    for w in dataset_summary.warnings:
+                        st.warning(w)
 
-            # Dataset Preview with Inventory Value
-            st.markdown("#### 📋 Dataset Preview (with calculated Inventory Value = Units × Unit Cost)")
-            st.dataframe(
-                clean_dataset_df.style.format({
-                    "Units": "{:,.0f}",
-                    "Unit Cost": "${:,.2f}",
-                    "Inventory Value": "${:,.2f}",
-                }),
-                use_container_width=True,
-                height=350,
-            )
+                # 1. Summary Breakdown Table
+                st.markdown("#### 📊 Inventory Class Distribution & Managerial Strategy")
+                summary_rows = []
+                for cls_name in ["A", "B", "C", "D"]:
+                    c_data = b[cls_name]
+                    summary_rows.append({
+                        "Class": c_data.class_name,
+                        "Items": c_data.item_count,
+                        "% of Items": f"{c_data.pct_items:.1f}%",
+                        "Total Sales ($)": f"${c_data.total_sales:,.2f}",
+                        "% of Sales": f"{c_data.pct_sales:.1f}%",
+                        "Total Hits": f"{c_data.total_hits:,.0f}",
+                        "% of Hits": f"{c_data.pct_hits:.1f}%",
+                        "Management Strategy": c_data.strategy,
+                    })
+                summary_table_df = pd.DataFrame(summary_rows)
+                st.dataframe(summary_table_df, use_container_width=True, hide_index=True)
 
-            # Category-Level Descriptive Breakdown
-            st.markdown("#### 🏷️ Category-Level Descriptive Breakdown")
-            cat_summary = clean_dataset_df.groupby("Category").agg(
-                Products=("Product", "nunique"),
-                Total_Units=("Units", "sum"),
-                Total_Inventory_Value=("Inventory Value", "sum"),
-                Avg_Unit_Cost=("Unit Cost", "mean")
-            ).reset_index()
+                # 2. 2D Multicriteria Cross-Matrix
+                col_matrix, col_rules = st.columns([1, 1])
+                with col_matrix:
+                    st.markdown("#### 🧩 Multicriteria Matrix (Sales vs. Hits)")
+                    st.caption("Cross-tabulation of SKUs across Sales Class (rows) and Hits Class (columns):")
+                    st.dataframe(dataset_summary.cross_matrix, use_container_width=True)
 
-            cat_summary["% Total Value"] = (cat_summary["Total_Inventory_Value"] / dataset_summary.total_inventory_value) * 100
-            st.dataframe(
-                cat_summary.style.format({
-                    "Total_Units": "{:,.0f}",
-                    "Total_Inventory_Value": "${:,.2f}",
-                    "Avg_Unit_Cost": "${:,.2f}",
-                    "% Total Value": "{:.1f}%",
-                }),
-                use_container_width=True,
-            )
+                with col_rules:
+                    st.markdown("#### 📐 BAN 517 Multicriteria Methodology")
+                    st.markdown("""
+                    **Step 1: Classify Sales and Hits Separately**
+                    - Rank items from highest to lowest independently.
+                    - Pareto thresholds for BOTH criteria:
+                      - **Class A (Score 4)**: 0–60% cumulative contribution
+                      - **Class B (Score 3)**: 61–80% cumulative contribution
+                      - **Class C (Score 2)**: 81–90% cumulative contribution
+                      - **Class D (Score 1)**: 91–100% cumulative contribution
+
+                    **Step 2: Combined Weighted Score**
+                    - $\\text{Weighted Score} = 0.65 \\times \\text{Sales Score} + 0.35 \\times \\text{Hits Score}$
+                    - *Example*: Sales Class A (4) and Hits Class B (3) produce:
+                      $$0.65 \\times 4 + 0.35 \\times 3 = 2.60 + 1.05 = 3.65$$
+
+                    **Step 3: Assign Final Inventory Class**
+                    - **Class A**: 3.25 through 4.00
+                    - **Class B**: 2.50 up to but not including 3.25
+                    - **Class C**: 1.75 up to but not including 2.50
+                    - **Class D**: Below 1.75
+                    """)
+
+                # 3. Interactive Filter and Full Data Preview
+                st.markdown("#### 📋 Enriched Inventory Dataset Preview")
+                col_f1, _ = st.columns([1, 2])
+                with col_f1:
+                    class_filter = st.selectbox(
+                        "Filter by Final Inventory Class:",
+                        options=["All Classes", "Class A only", "Class B only", "Class C only", "Class D only"],
+                    )
+
+                filtered_df = clean_dataset_df.copy()
+                if class_filter == "Class A only":
+                    filtered_df = filtered_df[filtered_df["Final Inventory Class"] == "A"]
+                elif class_filter == "Class B only":
+                    filtered_df = filtered_df[filtered_df["Final Inventory Class"] == "B"]
+                elif class_filter == "Class C only":
+                    filtered_df = filtered_df[filtered_df["Final Inventory Class"] == "C"]
+                elif class_filter == "Class D only":
+                    filtered_df = filtered_df[filtered_df["Final Inventory Class"] == "D"]
+
+                display_cols = [
+                    "Item Number", "Item Name", "UoM",
+                    "Sales ($)", "Hits",
+                    "Sales cumulative percentage", "Sales Class", "Sales Score",
+                    "Hits cumulative percentage", "Hits Class", "Hits Score",
+                    "Weighted Score", "Final Inventory Class"
+                ]
+                st.dataframe(
+                    filtered_df[display_cols].style.format({
+                        "Sales ($)": "${:,.2f}",
+                        "Hits": "{:,.0f}",
+                        "Sales cumulative percentage": "{:.1%}",
+                        "Hits cumulative percentage": "{:.1%}",
+                        "Weighted Score": "{:.2f}",
+                    }),
+                    use_container_width=True,
+                    height=400,
+                )
+
+                # Export button
+                csv_export = clean_dataset_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="📥 Download Classified Inventory CSV",
+                    data=csv_export,
+                    file_name="inventory_classified_abcd.csv",
+                    mime="text/csv",
+                )
+
+            elif dataset_type == "valuation" and isinstance(dataset_summary, InventoryDatasetSummary):
+                st.success("✅ Inventory valuation dataset successfully loaded and validated.")
+
+                # Descriptive Analysis KPI Cards
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Total Products", f"{dataset_summary.num_products:,}", "Distinct SKUs")
+                k2.metric("Total Units", f"{dataset_summary.total_units:,.0f}", "Aggregate inventory units")
+                k3.metric("Total Inventory Value", f"${dataset_summary.total_inventory_value:,.2f}", "Units × Unit Cost")
+                k4.metric("Product Categories", f"{dataset_summary.num_categories}", f"Avg Unit Cost: ${dataset_summary.avg_unit_cost:,.2f}")
+
+                if dataset_summary.warnings:
+                    st.markdown("##### ⚠️ Data Cleaning Notices")
+                    for w in dataset_summary.warnings:
+                        st.warning(w)
+
+                # Dataset Preview with Inventory Value
+                st.markdown("#### 📋 Dataset Preview (with calculated Inventory Value = Units × Unit Cost)")
+                st.dataframe(
+                    clean_dataset_df.style.format({
+                        "Units": "{:,.0f}",
+                        "Unit Cost": "${:,.2f}",
+                        "Inventory Value": "${:,.2f}",
+                    }),
+                    use_container_width=True,
+                    height=350,
+                )
+
+                # Category-Level Descriptive Breakdown
+                st.markdown("#### 🏷️ Category-Level Descriptive Breakdown")
+                cat_summary = clean_dataset_df.groupby("Category").agg(
+                    Products=("Product", "nunique"),
+                    Total_Units=("Units", "sum"),
+                    Total_Inventory_Value=("Inventory Value", "sum"),
+                    Avg_Unit_Cost=("Unit Cost", "mean")
+                ).reset_index()
+
+                cat_summary["% Total Value"] = (cat_summary["Total_Inventory_Value"] / dataset_summary.total_inventory_value) * 100
+                st.dataframe(
+                    cat_summary.style.format({
+                        "Total_Units": "{:,.0f}",
+                        "Total_Inventory_Value": "${:,.2f}",
+                        "Avg_Unit_Cost": "${:,.2f}",
+                        "% Total Value": "{:.1f}%",
+                    }),
+                    use_container_width=True,
+                )
 
         else:
             st.info("👈 **No dataset currently loaded.** Upload a CSV inventory dataset using the file uploader at the bottom of the sidebar.")
             st.markdown("""
-            **Required CSV Schema:**
-            Your dataset must contain the following 4 columns:
-            1. **`Product`**: Product name or SKU code
-            2. **`Category`**: Product or inventory category
-            3. **`Units`**: Non-negative integer or float quantity
-            4. **`Unit Cost`**: Non-negative unit acquisition or production cost
+            **Supported CSV Formats:**
+
+            #### 1. Multicriteria Inventory Classification Schema:
+            Contains transaction and velocity data to classify items into **A, B, C, and D** classes:
+            - **`Item Number`**: Unique SKU identifier
+            - **`Item Name`**: Item description or title
+            - **`UoM`**: Unit of Measure (e.g. EA, BOX, CASE)
+            - **`Sales ($)`**: Total dollar sales / revenue volume
+            - **`Hits`**: Order line / picking frequency
+
+            #### 2. Inventory Valuation Schema:
+            Contains stock levels and acquisition costs for valuation:
+            - **`Product`**: Product name or SKU code
+            - **`Category`**: Inventory category
+            - **`Units`**: On-hand quantity
+            - **`Unit Cost`**: Cost per unit
             """)
 
-            # Sample Template Table
-            st.markdown("##### 📝 Expected CSV Format Preview:")
-            sample_df = pd.DataFrame([
-                {"Product": "SKU-1001", "Category": "Electronics", "Units": 150, "Unit Cost": 45.00},
-                {"Product": "SKU-1002", "Category": "Hardware", "Units": 500, "Unit Cost": 8.50},
-                {"Product": "SKU-1003", "Category": "Office Supplies", "Units": 1200, "Unit Cost": 2.25},
-                {"Product": "SKU-1004", "Category": "Electronics", "Units": 80, "Unit Cost": 120.00},
-            ])
-            sample_df["Inventory Value"] = sample_df["Units"] * sample_df["Unit Cost"]
-            st.dataframe(
-                sample_df.style.format({
-                    "Units": "{:,.0f}",
-                    "Unit Cost": "${:,.2f}",
-                    "Inventory Value": "${:,.2f}",
-                }),
-                use_container_width=True,
-            )
+            # Sample Previews
+            c_sample1, c_sample2 = st.columns(2)
+            with c_sample1:
+                st.markdown("##### 📝 Classification CSV Example:")
+                cls_sample_df = pd.DataFrame([
+                    {"Item Number": "SKU-1001", "Item Name": "Lithium Battery", "UoM": "EA", "Sales ($)": 85000.0, "Hits": 1200},
+                    {"Item Number": "SKU-1002", "Item Name": "Steel Fastener", "UoM": "BOX", "Sales ($)": 3500.0, "Hits": 950},
+                    {"Item Number": "SKU-1003", "Item Name": "Control Panel", "UoM": "EA", "Sales ($)": 42000.0, "Hits": 80},
+                    {"Item Number": "SKU-1004", "Item Name": "Obsolete Cable", "UoM": "EA", "Sales ($)": 0.0, "Hits": 0},
+                ])
+                st.dataframe(
+                    cls_sample_df.style.format({
+                        "Sales ($)": "${:,.2f}",
+                        "Hits": "{:,.0f}",
+                    }),
+                    use_container_width=True,
+                )
+
+            with c_sample2:
+                st.markdown("##### 📝 Valuation CSV Example:")
+                val_sample_df = pd.DataFrame([
+                    {"Product": "SKU-1001", "Category": "Electronics", "Units": 150, "Unit Cost": 45.00},
+                    {"Product": "SKU-1002", "Category": "Hardware", "Units": 500, "Unit Cost": 8.50},
+                    {"Product": "SKU-1003", "Category": "Office Supplies", "Units": 1200, "Unit Cost": 2.25},
+                    {"Product": "SKU-1004", "Category": "Electronics", "Units": 80, "Unit Cost": 120.00},
+                ])
+                val_sample_df["Inventory Value"] = val_sample_df["Units"] * val_sample_df["Unit Cost"]
+                st.dataframe(
+                    val_sample_df.style.format({
+                        "Units": "{:,.0f}",
+                        "Unit Cost": "${:,.2f}",
+                        "Inventory Value": "${:,.2f}",
+                    }),
+                    use_container_width=True,
+                )
 
     # =========================================================================
     # TAB 4: Mathematical Formulations Reference
