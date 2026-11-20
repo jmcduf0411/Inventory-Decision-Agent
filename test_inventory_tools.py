@@ -1061,4 +1061,103 @@ class TestSafetyStockROPUnitConversionRegression:
         assert resp.raw_result.case_description == "Case 4: Variable Demand, Variable Lead Time"
 
 
+# ===========================================================================
+# 9. Quantity Discount Routing & BAN 517 Test 8 Regression Tests
+# ===========================================================================
+
+class TestQuantityDiscountRegression:
+    """
+    Automated regression tests verifying that natural language prompts
+    describing multiple price tiers, brackets, and quantity discounts
+    are routed to the Quantity Discount model, that price-first ranges
+    (below, to, or more) are parsed into discrete tiers, and that
+    feasible EOQ / boundary quantities and total costs are evaluated correctly.
+    """
+
+    def test_professor_report_generator_test8_quantity_discount(self):
+        """
+        Exact BAN 517 Project Report Generator Test 8 prompt:
+        'Annual demand is 5,000 units. Ordering cost is $60 per order and annual holding cost is 20% of unit cost.
+         The supplier charges $12 per unit for orders below 500 units, $11.50 for 500-999 units,
+         and $11 for orders of 1,000 units or more. Find the best order quantity and annual cost.'
+
+        Expected:
+            - Model: Quantity Discount Model (not standard EOQ)
+            - Demand D: 5,000 units/year
+            - Order Cost S: $60.00
+            - Holding Rate i: 20% (0.20)
+            - Tier 1: Q in [0, 499], C1 = $12.00, H1 = $2.40, EOQ1 = 500.0 (infeasible), Candidate Q = 499, TC1 = $61,200.00
+            - Tier 2: Q in [500, 999], C2 = $11.50, H2 = $2.30, EOQ2 = 510.75 (feasible), Candidate Q = 510.75, TC2 = $58,674.73
+            - Tier 3: Q in [1000, inf), C3 = $11.00, H3 = $2.20, EOQ3 = 522.23 (infeasible), Candidate Q = 1000 (price break), TC3 = $56,400.00
+            - Optimal Tier: Tier 3
+            - Recommended Order Quantity Q*: 1,000 units
+            - Optimal Unit Price: $11.00/unit
+            - Annual Purchase Cost: 5,000 * $11.00 = $55,000.00
+            - Annual Ordering Cost: (5,000 / 1,000) * $60 = $300.00
+            - Annual Holding Cost: (1,000 / 2) * (0.20 * $11) = $1,100.00
+            - Total Annual Cost: $55,000 + $300 + $1,100 = $56,400.00
+            - Annual Cost Savings vs Base Tier: $61,200 - $56,400 = $4,800.00
+        """
+        agent = InventoryDecisionAgent()
+        prompt = (
+            "Annual demand is 5,000 units. Ordering cost is $60 per order and annual holding cost is 20% of unit cost. "
+            "The supplier charges $12 per unit for orders below 500 units, $11.50 for 500-999 units, "
+            "and $11 for orders of 1,000 units or more. Find the best order quantity and annual cost."
+        )
+        resp = agent.ask(prompt)
+
+        assert resp.success is True, f"Agent failed on Test 8 prompt: {resp.missing_inputs}"
+        assert resp.identified_model == "quantity_discount"
+
+        # Check extracted inputs
+        inputs = resp.extracted_inputs
+        assert inputs["demand"] == 5000.0
+        assert inputs["order_cost"] == 60.0
+        assert inputs["holding_rate"] == 0.20
+
+        tiers = inputs["discount_tiers"]
+        assert len(tiers) == 3
+        # Tier 1: [0, 499] at $12.00
+        assert tiers[0][0] == 0.0
+        assert tiers[0][1] == 499.0
+        assert tiers[0][2] == 12.0
+        # Tier 2: [500, 999] at $11.50
+        assert tiers[1][0] == 500.0
+        assert tiers[1][1] == 999.0
+        assert tiers[1][2] == 11.50
+        # Tier 3: [1000, None] at $11.00
+        assert tiers[2][0] == 1000.0
+        assert tiers[2][1] is None
+        assert tiers[2][2] == 11.0
+
+        # Check calculation result
+        res: tools.QuantityDiscountResult = resp.raw_result
+        assert res.best_tier.tier_number == 3
+        assert res.recommended_order_quantity == 1000
+        assert res.best_tier.candidate_quantity == 1000.0
+        assert res.best_tier.unit_price == 11.0
+
+        # Check component costs
+        assert pytest.approx(res.best_tier.annual_purchase_cost, rel=1e-3) == 55000.0
+        assert pytest.approx(res.best_tier.annual_ordering_cost, rel=1e-3) == 300.0
+        assert pytest.approx(res.best_tier.annual_holding_cost, rel=1e-3) == 1100.0
+        assert pytest.approx(res.best_tier.total_annual_cost, rel=1e-3) == 56400.0
+        assert pytest.approx(res.total_annual_cost, rel=1e-3) == 56400.0
+        assert pytest.approx(res.cost_savings_vs_base, rel=1e-3) == 4800.0
+
+        # Check all 3 tiers evaluated
+        assert len(res.tiers_evaluated) == 3
+        t1, t2, t3 = res.tiers_evaluated
+        assert pytest.approx(t1.total_annual_cost, rel=1e-2) == 61200.00
+        assert pytest.approx(t2.total_annual_cost, rel=1e-2) == 58674.73
+        assert pytest.approx(t3.total_annual_cost, rel=1e-2) == 56400.00
+
+        # Check executive explanation reflects correct Q* and total cost
+        assert "1,000 units" in resp.explanation
+        assert "56,400.00" in resp.explanation
+        assert "11.00" in resp.explanation
+        assert "4,800.00" in resp.explanation
+
+
+
 

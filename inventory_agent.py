@@ -65,7 +65,9 @@ class ModelIdentifier:
             "quantity discount", "discount tier", "price break", "price breaks",
             "quantity break", "quantity breaks", "volume discount",
             "bulk discount", "price schedule", "bracket", "brackets",
-            "tier 1", "tiers", "price tier", "price tiers", "discount tiers"
+            "tier 1", "tiers", "price tier", "price tiers", "discount tiers",
+            "supplier charges", "charges $", "orders below", "orders of",
+            "per unit for orders", "units or more", "best order quantity"
         ],
         "fixed_period_review": [
             "fixed period", "periodic review", "review period", "order-up-to",
@@ -105,6 +107,11 @@ class ModelIdentifier:
         for model_key, keywords in cls.KEYWORDS.items():
             matched = [kw for kw in keywords if kw in q_lower]
             scores[model_key] = (len(matched), matched)
+
+        # Check if multiple discount tiers can be extracted from the question
+        detected_tiers = InputExtractor.extract_discount_tiers(question)
+        if len(detected_tiers) >= 2:
+            return "quantity_discount", 0.95, ["multiple_price_tiers_detected"]
 
         # Explicit pattern regex checks
         if re.search(r'review(?:\s+\w+){0,3}\s+every\s+\d+', q_lower) or re.search(r'on[\s-]hand.*on[\s-]order', q_lower):
@@ -471,43 +478,98 @@ class InputExtractor:
     @classmethod
     def extract_discount_tiers(cls, text: str) -> List[Tuple[float, Optional[float], float]]:
         """
-        Parses discount tiers such as:
-        - "1-999: $5.00, 1000-1999: $4.80, 2000+: $4.75"
-        - "1 to 999 units at $5.00, 1000 to 1999 units at $4.80, and 2000+ at $4.75"
-        - "0-999 @ $5, 1000-1999 @ $4.80, 2000+ @ $4.60"
-        - "Tier 1: 0-499 units at $10.00; Tier 2: 500-999 units at $9.00; Tier 3: 1000+ units at $8.00"
+        Parses discount tiers across various natural language forms:
+        - Price first with below/to/more:
+          "$12 per unit for orders below 500 units, $11.50 for 500-999 units, and $11 for orders of 1,000 units or more"
+        - Quantity first:
+          "1 to 999 units at $5.00, 1000 to 1999 units at $4.80, and 2000+ units at $4.75"
+        - Colon format:
+          "1-999: $5.00, 1000-1999: $4.80, 2000+: $4.75"
+        - At format:
+          "0-999 @ $5, 1000-1999 @ $4.80, 2000+ @ $4.60"
+        - Tier labels:
+          "Tier 1: 0-499 units at $10.00; Tier 2: 500-999 units at $9.00; Tier 3: 1000+ units at $8.00"
+        - Bracket format:
+          "[0, 499, 12.0], [500, 999, 11.50], [1000, None, 11.0]"
         """
         tiers: List[Tuple[float, Optional[float], float]] = []
 
-        # Pattern A: "min to/hyphen max (units) (at/@/is/for/:) $price"
-        range_pattern = re.findall(
-            r'(\d+[\d,]*)\s*(?:to|-)\s*(\d+[\d,]*)\s*(?:units)?\s*(?:at|@|is|for|costs?|:)?\s*\$?([0-9]+(?:\.[0-9]+)?)',
-            text, re.IGNORECASE
+        # Format 1: Bracket format [min, max, price]
+        bracket_matches = re.findall(
+            r'\[\s*(\d+[\d,]*)\s*,\s*(\d+[\d,]*|None|inf|\+)?\s*,\s*\$?([0-9.]+)\s*\]', text, re.IGNORECASE
         )
-        for min_q, max_q, pr in range_pattern:
-            min_val = float(min_q.replace(",", ""))
-            max_val = float(max_q.replace(",", ""))
-            if max_val >= min_val:
+        if bracket_matches:
+            for min_q, max_q, pr in bracket_matches:
+                min_val = float(min_q.replace(",", ""))
+                max_val = None if (not max_q or max_q.lower() in ["none", "inf", "+"] or max_q == "") else float(max_q.replace(",", ""))
                 tiers.append((min_val, max_val, float(pr)))
+            return sorted(tiers, key=lambda t: t[0])
 
-        # Pattern B: "min+ (units) (at/@/is/for/:) $price" or "min and above / or more"
-        plus_pattern = re.findall(
-            r'(\d+[\d,]*)\s*(?:\+|and\s+(?:above|over|more)|or\s+more)\s*(?:units)?\s*(?:at|@|is|for|costs?|:)?\s*\$?([0-9]+(?:\.[0-9]+)?)',
-            text, re.IGNORECASE
-        )
-        for min_q, pr in plus_pattern:
-            tiers.append((float(min_q.replace(",", "")), None, float(pr)))
+        # Clean text: remove commas inside numbers (e.g. 5,000 -> 5000, 1,000 -> 1000)
+        clean_text = re.sub(r'(\d),(\d)', r'\1\2', text)
 
-        # Pattern C: bracket format: [0, 999, 5.00]
-        if not tiers:
-            simple_matches = re.findall(
-                r'\[\s*(\d+)\s*,\s*(\d+|None|inf|\+)?\s*,\s*\$?([0-9.]+)\s*\]', text, re.IGNORECASE
+        # Split into candidate clauses by semicolon, newline, "and" (not followed by over/above/more), or punctuation separating items
+        clauses = re.split(r'[;\n]|\band\b(?!\s+(?:above|over|more))|,(?!\d)|\.(?!\d)', clean_text, flags=re.IGNORECASE)
+
+        for clause in clauses:
+            clause = clause.strip()
+            if not clause:
+                continue
+
+            # Look for a price in the clause
+            # Must have $ sign, or "dollars", or preceded by "at / @ / charges / costs / price", or followed by "per unit / each"
+            pr_match = re.search(
+                r'\$([0-9]+(?:\.[0-9]+)?)|([0-9]+(?:\.[0-9]+)?)\s*(?:dollars?|USD)|\b(?:at|@|costs?|charges?|price\s*[:=])\s*\$?([0-9]+(?:\.[0-9]+)?)|([0-9]+(?:\.[0-9]+)?)\s*(?:per\s+unit|/\s*unit|each)',
+                clause, re.IGNORECASE
             )
-            for min_q, max_q, pr in simple_matches:
-                max_val = None if (max_q.lower() in ["none", "inf", "+"] or max_q == "") else float(max_q)
-                tiers.append((float(min_q), max_val, float(pr)))
+            if not pr_match:
+                continue
 
-        return sorted(tiers, key=lambda t: t[0]) if tiers else []
+            pr_str = pr_match.group(1) or pr_match.group(2) or pr_match.group(3) or pr_match.group(4)
+            try:
+                price = float(pr_str)
+            except (ValueError, TypeError):
+                continue
+
+            # Remove the matched price substring to isolate the quantity range
+            pr_span = pr_match.span()
+            clause_rem = clause[:pr_span[0]] + " " + clause[pr_span[1]:]
+
+            # Check quantity patterns in the remaining clause:
+            # A. Below / under / less than / up to / < max_q
+            m_below = re.search(r'(?:below|under|less\s+than|<|up\s+to)\s*(\d+)', clause_rem, re.IGNORECASE)
+            if m_below:
+                max_q = float(m_below.group(1))
+                upper = max_q - 1.0 if max_q.is_integer() else max_q
+                tiers.append((0.0, upper, price))
+                continue
+
+            # B. Range: min to/hyphen max
+            m_range = re.search(r'(\d+)\s*(?:to|-)\s*(\d+)', clause_rem, re.IGNORECASE)
+            if m_range:
+                min_q = float(m_range.group(1))
+                max_q = float(m_range.group(2))
+                if max_q >= min_q:
+                    tiers.append((min_q, max_q, price))
+                    continue
+
+            # C. Plus / or more / and above / and over / over / above:
+            m_plus = re.search(r'(\d+)\s*(?:units)?\s*(?:\+|and\s+(?:above|over|more)|or\s+more|\babove\b|\bover\b)', clause_rem, re.IGNORECASE)
+            if m_plus:
+                min_q = float(m_plus.group(1))
+                tiers.append((min_q, None, price))
+                continue
+
+        # Deduplicate and sort by min_quantity
+        unique_tiers = []
+        seen = set()
+        for min_q, max_q, pr in tiers:
+            key = (min_q, max_q, pr)
+            if key not in seen:
+                seen.add(key)
+                unique_tiers.append((min_q, max_q, pr))
+
+        return sorted(unique_tiers, key=lambda t: t[0]) if unique_tiers else []
 
     @classmethod
     def extract_inputs(cls, model_key: str, question: str) -> Tuple[Dict[str, Any], List[str]]:
@@ -599,8 +661,8 @@ class InputExtractor:
 
             rate = cls.extract_percentage(question, [
                 r'(?:percentage\s+holding\s+cost|holding\s+rate|carrying\s+rate|holding\s+cost\s+rate|carrying\s+cost\s+rate)\s*(?:is|of|[:=]|about)?\s*([0-9.]+)\s*%?',
-                r'(?:holding\s+cost|carrying\s+cost)\s*(?:is|of|[:=]|about)?\s*([0-9.]+)\s*%',
-                r'([0-9.]+)\s*%\s*(?:of\s*(?:the\s*)?(?:unit\s*)?price|annual\s*holding|carrying\s*rate)',
+                r'(?:annual\s+)?(?:holding\s+cost|carrying\s+cost)\s*(?:is|of|[:=]|about)?\s*([0-9.]+)\s*%',
+                r'([0-9.]+)\s*%\s*(?:of\s*(?:the\s*)?(?:unit\s*)?(?:cost|price)|annual\s*holding|carrying\s*rate)',
                 r'holding_rate[:=]\s*([0-9.]+)',
             ])
             annual_h, h_period, raw_h, h_note = None, None, None, None
