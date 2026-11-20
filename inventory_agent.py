@@ -186,6 +186,179 @@ class InputExtractor:
         return res
 
     @classmethod
+    def parse_time_period(cls, period_str: str) -> str:
+        """Normalizes time period string to 'year', 'month', 'week', 'day', 'quarter'."""
+        p = str(period_str).lower().strip()
+        if any(k in p for k in ["year", "annum", "annual", "yearly"]):
+            return "year"
+        elif any(k in p for k in ["month", "monthly", "mo", "mth"]):
+            return "month"
+        elif any(k in p for k in ["week", "weekly", "wk"]):
+            return "week"
+        elif any(k in p for k in ["quarter", "quarterly", "qtr"]):
+            return "quarter"
+        elif any(k in p for k in ["day", "daily"]):
+            return "day"
+        return "year"
+
+    @classmethod
+    def get_period_annual_multiplier(cls, period: str, working_days: int = 250) -> float:
+        """Returns the conversion factor from period units to annual units."""
+        if period == "month":
+            return 12.0
+        elif period == "week":
+            return 52.0
+        elif period == "quarter":
+            return 4.0
+        elif period == "day":
+            return float(working_days)
+        return 1.0
+
+    @classmethod
+    def extract_demand_with_period(
+        cls, text: str, working_days: int = 250
+    ) -> Tuple[Optional[float], Optional[str], Optional[float], Optional[str]]:
+        """
+        Extracts demand and recognizes sub-annual time units (day, week, month, quarter, year).
+        Converts sub-annual demand to annual demand for consistent operations research calculations.
+
+        Returns:
+            (annual_demand, stated_period, raw_stated_demand, conversion_note)
+        """
+        # Patterns with explicit sub-annual or annual period
+        patterns_with_period = [
+            # 1. demand ... [number] units per/a/each [period]
+            r'(?:demand|usage|sales|requirement|sells?|consumes?|requires?)\s*(?:is|of|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?)\s*(?:units)?\s*(?:per|/|each|a)\s*(year|annum|month|week|day|quarter)',
+            # 2. [number] units per/a/each [period] (requires 'units')
+            r'([0-9,]+(?:\.[0-9]+)?)\s*(?:units)\s*(?:per|/|each|a)\s*(year|annum|month|week|day|quarter)',
+            # 3. (monthly|weekly|daily|annual|yearly|quarterly) demand ... [number]
+            r'(annual|yearly|monthly|weekly|daily|quarterly)\s*(?:demand|usage|sales|requirement)\s*(?:is|of|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?)',
+            # 4. demand ... [number] units (annually|yearly|monthly|weekly|daily|quarterly)
+            r'(?:demand|usage|sales|requirement)\s*(?:is|of|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?)\s*(?:units)?\s*(annually|yearly|monthly|weekly|daily|quarterly)',
+        ]
+
+        for pat in patterns_with_period:
+            match = re.search(pat, text, re.IGNORECASE)
+            if match:
+                g1, g2 = match.group(1), match.group(2)
+                try:
+                    raw_val = float(g1.replace(",", ""))
+                    p_str = g2
+                except ValueError:
+                    raw_val = float(g2.replace(",", ""))
+                    p_str = g1
+
+                period = cls.parse_time_period(p_str)
+                mult = cls.get_period_annual_multiplier(period, working_days=working_days)
+                annual_val = raw_val * mult
+
+                note = None
+                if period != "year":
+                    if period == "day":
+                        note = f"Stated daily demand of {raw_val:,.0f} units/day converted to annual demand of {annual_val:,.0f} units/year ({raw_val:,.0f} × {working_days} working days/year)."
+                    elif period == "week":
+                        note = f"Stated weekly demand of {raw_val:,.0f} units/week converted to annual demand of {annual_val:,.0f} units/year ({raw_val:,.0f} × 52 weeks/year)."
+                    elif period == "month":
+                        note = f"Stated monthly demand of {raw_val:,.0f} units/month converted to annual demand of {annual_val:,.0f} units/year ({raw_val:,.0f} × 12 months/year)."
+                    elif period == "quarter":
+                        note = f"Stated quarterly demand of {raw_val:,.0f} units/quarter converted to annual demand of {annual_val:,.0f} units/year ({raw_val:,.0f} × 4 quarters/year)."
+
+                return annual_val, period, raw_val, note
+
+        # Fallback to plain annual demand patterns
+        plain_patterns = [
+            r'(?:annual\s+demand|yearly\s+demand|annual\s+sales|yearly\s+sales|annual\s+usage|annual\s+requirement|customer\s+demand|demand\s+of|demand\s+is)\s*(?:of|is|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?)',
+            r'([0-9,]+(?:\.[0-9]+)?)\s*(?:units\s+per\s+year|units/year|annual\s+units|units\s+annually)',
+            r'(?:sells?|selling|consumes?|requires?)\s*(?:about|around)?\s*([0-9,]+(?:\.[0-9]+)?)\s*(?:units)?\s*(?:per\s+year|annually|a\s+year|each\s+year)',
+            r'\b[dD]\s*[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
+            r'demand[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
+        ]
+        val = cls.extract_numbers_after(text, plain_patterns)
+        if val is not None:
+            return val, "year", val, None
+
+        # Clause-level fallback
+        clauses = re.split(r'[,;.\n]|\band\b', text, flags=re.IGNORECASE)
+        for clause in clauses:
+            c_low = clause.lower()
+            if any(w in c_low for w in ["demand", "sells", "usage", "annual", "consumes"]):
+                nums = cls.find_all_numbers(clause)
+                if nums:
+                    raw_val = nums[0]
+                    period = "year"
+                    if any(m in c_low for m in ["month", "monthly", "mo"]):
+                        period = "month"
+                    elif any(w in c_low for w in ["week", "weekly", "wk"]):
+                        period = "week"
+                    elif any(d in c_low for d in ["day", "daily"]):
+                        period = "day"
+                    elif any(q in c_low for q in ["quarter", "quarterly"]):
+                        period = "quarter"
+
+                    mult = cls.get_period_annual_multiplier(period, working_days=working_days)
+                    annual_val = raw_val * mult
+                    note = f"Converted {raw_val:,.0f} units/{period} to annual demand of {annual_val:,.0f} units/year." if period != "year" else None
+                    return annual_val, period, raw_val, note
+
+        return None, None, None, None
+
+    @classmethod
+    def extract_holding_cost_with_period(
+        cls, text: str, working_days: int = 250
+    ) -> Tuple[Optional[float], Optional[str], Optional[float], Optional[str]]:
+        """
+        Extracts fixed holding cost and recognizes sub-annual time units (day, week, month, year).
+        Converts sub-annual holding cost to annual holding cost ($/unit/year).
+
+        Returns:
+            (annual_holding_cost, stated_period, raw_holding_cost, conversion_note)
+        """
+        patterns_with_period = [
+            r'\$?([0-9,]+(?:\.[0-9]+)?)\s*(?:dollars?|USD)?\s*(?:per\s+unit|/\s*unit)\s*(?:per|/|each|a)\s*(year|annum|month|week|day)',
+            r'(?:fixed\s+holding\s+cost|holding\s+cost|carrying\s+cost|storage\s+cost)\s*(?:is|of|[:=]|about)?\s*\$?([0-9,]+(?:\.[0-9]+)?)\s*(?:per|/|each|a)\s*(year|annum|month|week|day)',
+        ]
+        for pat in patterns_with_period:
+            match = re.search(pat, text, re.IGNORECASE)
+            if match:
+                raw_val = float(match.group(1).replace(",", ""))
+                period = cls.parse_time_period(match.group(2))
+                mult = cls.get_period_annual_multiplier(period, working_days=working_days)
+                annual_val = raw_val * mult
+                note = f"Stated holding cost of ${raw_val:.2f}/unit/{period} converted to annual holding cost of ${annual_val:.2f}/unit/year." if period != "year" else None
+                return annual_val, period, raw_val, note
+
+        std_pats = [
+            r'(?:fixed\s+holding\s+cost|holding\s+cost|carrying\s+cost|storage\s+cost|holding\s+expense|carrying\s+expense|inventory\s+carrying\s+cost)\s*(?:is|of|[:=]|about)?\s*\$?([0-9,]+(?:\.[0-9]+)?)(?!\s*%)',
+            r'\$?([0-9,]+(?:\.[0-9]+)?)\s*(?:per\s+unit\s+per\s+year|per\s+unit\s+annually|/\s*unit\s*/\s*year|/\s*unit\s+annually|per\s+unit\s+holding|per\s+unit\s+carrying)',
+            r'holding_cost[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
+            r'\b[hH]\s*[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
+        ]
+        val = cls.extract_numbers_after(text, std_pats)
+        if val is not None:
+            return val, "year", val, None
+
+        clauses = re.split(r'[,;.\n]|\band\b', text, flags=re.IGNORECASE)
+        for clause in clauses:
+            c_low = clause.lower()
+            if any(w in c_low for w in ["holding", "carrying", "storage"]) and "%" not in clause:
+                nums = cls.find_all_numbers(clause)
+                if nums:
+                    raw_val = nums[0]
+                    period = "year"
+                    if any(m in c_low for m in ["month", "monthly", "mo"]):
+                        period = "month"
+                    elif any(w in c_low for w in ["week", "weekly", "wk"]):
+                        period = "week"
+                    elif any(d in c_low for d in ["day", "daily"]):
+                        period = "day"
+                    mult = cls.get_period_annual_multiplier(period, working_days=working_days)
+                    annual_val = raw_val * mult
+                    note = f"Converted ${raw_val:.2f}/unit/{period} to annual holding cost of ${annual_val:.2f}/unit/year." if period != "year" else None
+                    return annual_val, period, raw_val, note
+
+        return None, None, None, None
+
+    @classmethod
     def extract_ordering_cost(cls, text: str) -> Optional[float]:
         """
         Recognizes all common ordering cost synonyms:
@@ -349,22 +522,15 @@ class InputExtractor:
         # MODEL 1: EOQ
         # =====================================================================
         if model_key == "eoq":
-            # 1. Demand D
-            d = cls.extract_numbers_after(question, [
-                r'(?:annual\s+demand|yearly\s+demand|annual\s+sales|yearly\s+sales|annual\s+usage|annual\s+requirement|customer\s+demand|demand\s+of|demand\s+is)\s*(?:of|is|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'([0-9,]+(?:\.[0-9]+)?)\s*(?:units\s+per\s+year|units/year|annual\s+units|units\s+annually)',
-                r'(?:sells?|selling|consumes?|requires?)\s*(?:about|around)?\s*([0-9,]+(?:\.[0-9]+)?)\s*(?:units)?\s*(?:per\s+year|annually|a\s+year|each\s+year)',
-                r'\b[dD]\s*[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'demand[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
+            # Working days first (needed if daily demand conversion is required)
+            w = cls.extract_numbers_after(question, [
+                r'([0-9]+)\s*(?:working\s+days|operating\s+days|days\s+per\s+year|days\s+a\s+year)',
+                r'working_days[:=]\s*([0-9]+)',
             ])
-            if d is None:
-                # Clause fallback for demand
-                for clause in re.split(r'[,;.\n]|\band\b', question, flags=re.IGNORECASE):
-                    if any(w in clause.lower() for w in ["demand", "sells", "usage", "annual"]):
-                        nums = cls.find_all_numbers(clause)
-                        if nums:
-                            d = nums[0]
-                            break
+            working_days_val = int(w) if w else 250
+
+            # 1. Demand D (with period recognition: day, week, month, year)
+            annual_d, d_period, raw_d, d_note = cls.extract_demand_with_period(question, working_days=working_days_val)
 
             # 2. Ordering Cost S (Recognizing all requested synonyms)
             s = cls.extract_ordering_cost(question)
@@ -378,38 +544,19 @@ class InputExtractor:
                 r'holding_rate[:=]\s*([0-9.]+)',
             ])
 
-            # Fixed holding cost ($/unit/year)
-            h = cls.extract_numbers_after(question, [
-                r'(?:fixed\s+holding\s+cost|holding\s+cost|carrying\s+cost|storage\s+cost|holding\s+expense|carrying\s+expense|inventory\s+carrying\s+cost)\s*(?:is|of|[:=]|about)?\s*\$?([0-9,]+(?:\.[0-9]+)?)(?!\s*%)',
-                r'\$?([0-9,]+(?:\.[0-9]+)?)\s*(?:per\s+unit\s+per\s+year|per\s+unit\s+annually|/\s*unit\s*/\s*year|/\s*unit\s+annually|per\s+unit\s+holding|per\s+unit\s+carrying)',
-                r'holding_cost[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'\b[hH]\s*[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
-            ])
-
-            if h is None and rate is None:
-                # Clause fallback for holding
-                for clause in re.split(r'[,;.\n]|\band\b', question, flags=re.IGNORECASE):
-                    if any(w in clause.lower() for w in ["holding", "carrying", "storage"]):
-                        if "%" in clause:
-                            rate = cls.extract_percentage(clause, [r'([0-9.]+)\s*%'])
-                        else:
-                            nums = cls.find_all_numbers(clause)
-                            if nums:
-                                h = nums[0]
-                        if h is not None or rate is not None:
-                            break
+            annual_h, h_period, raw_h, h_note = None, None, None, None
+            if rate is None:
+                annual_h, h_period, raw_h, h_note = cls.extract_holding_cost_with_period(question, working_days=working_days_val)
 
             # 4. Unit purchase price C (strictly separate from holding cost $/unit/year)
             c = cls.extract_unit_purchase_cost(question)
 
-            # 5. Working days
-            w = cls.extract_numbers_after(question, [
-                r'([0-9]+)\s*(?:working\s+days|operating\s+days|days\s+per\s+year|days\s+a\s+year)',
-                r'working_days[:=]\s*([0-9]+)',
-            ])
-
-            if d is not None:
-                inputs["demand"] = d
+            if annual_d is not None:
+                inputs["demand"] = annual_d
+                if d_period and d_period != "year":
+                    inputs["stated_demand"] = raw_d
+                    inputs["demand_period"] = d_period
+                    inputs["demand_conversion_note"] = d_note
             else:
                 missing.append("demand (Annual Demand D)")
 
@@ -418,8 +565,12 @@ class InputExtractor:
             else:
                 missing.append("order_cost (Ordering/Setup Cost S: ordering cost, setup cost, cost per order, setup expense, cost of placing an order)")
 
-            if h is not None:
-                inputs["holding_cost"] = h
+            if annual_h is not None:
+                inputs["holding_cost"] = annual_h
+                if h_period and h_period != "year":
+                    inputs["stated_holding_cost"] = raw_h
+                    inputs["holding_period"] = h_period
+                    inputs["holding_conversion_note"] = h_note
             elif rate is not None and c is not None:
                 inputs["holding_rate"] = rate
                 inputs["unit_cost"] = c
@@ -431,51 +582,43 @@ class InputExtractor:
 
             if c is not None and "unit_cost" not in inputs:
                 inputs["unit_cost"] = c
-            inputs["working_days"] = int(w) if w else 250
+            inputs["working_days"] = working_days_val
 
         # =====================================================================
         # MODEL 2: QUANTITY DISCOUNT
         # =====================================================================
         elif model_key == "quantity_discount":
-            # Demand D
-            d = cls.extract_numbers_after(question, [
-                r'(?:annual\s+demand|yearly\s+demand|demand\s+of|demand\s+is)\s*(?:of|is|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'([0-9,]+(?:\.[0-9]+)?)\s*(?:units\s+per\s+year|units/year)',
-                r'demand[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
+            w = cls.extract_numbers_after(question, [
+                r'([0-9]+)\s*(?:working\s+days|operating\s+days|days\s+per\s+year|days\s+a\s+year)',
+                r'working_days[:=]\s*([0-9]+)',
             ])
-            if d is None:
-                for clause in re.split(r'[,;.\n]|\band\b', question, flags=re.IGNORECASE):
-                    if "demand" in clause.lower() or "annual" in clause.lower():
-                        nums = cls.find_all_numbers(clause)
-                        if nums:
-                            d = nums[0]
-                            break
+            working_days_val = int(w) if w else 250
 
-            # Ordering Cost S (Recognizing all synonyms)
+            annual_d, d_period, raw_d, d_note = cls.extract_demand_with_period(question, working_days=working_days_val)
             s = cls.extract_ordering_cost(question)
 
-            # Holding rate i (percentage) or fixed holding cost H
             rate = cls.extract_percentage(question, [
                 r'(?:percentage\s+holding\s+cost|holding\s+rate|carrying\s+rate|holding\s+cost\s+rate|carrying\s+cost\s+rate)\s*(?:is|of|[:=]|about)?\s*([0-9.]+)\s*%?',
                 r'(?:holding\s+cost|carrying\s+cost)\s*(?:is|of|[:=]|about)?\s*([0-9.]+)\s*%',
                 r'([0-9.]+)\s*%\s*(?:of\s*(?:the\s*)?(?:unit\s*)?price|annual\s*holding|carrying\s*rate)',
                 r'holding_rate[:=]\s*([0-9.]+)',
             ])
-            h = cls.extract_numbers_after(question, [
-                r'(?:fixed\s+holding\s+cost|holding\s+cost|carrying\s+cost)\s*(?:is|of|[:=]|about)?\s*\$?([0-9,]+(?:\.[0-9]+)?)\s*(?:per\s+unit|\$/unit)(?!\s*%)',
-                r'holding_cost[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
-            ])
+            annual_h, h_period, raw_h, h_note = None, None, None, None
+            if rate is None:
+                annual_h, h_period, raw_h, h_note = cls.extract_holding_cost_with_period(question, working_days=working_days_val)
 
-            # Unit purchase price (base price)
             base_p = cls.extract_numbers_after(question, [
                 r'(?:base\s+price|unit\s+purchase\s+price|standard\s+price|base\s+cost)\s*(?:is|of|[:=]|about)?\s*\$?([0-9,]+(?:\.[0-9]+)?)',
             ])
 
-            # Quantity breaks (tiers)
             tiers = cls.extract_discount_tiers(question)
 
-            if d is not None:
-                inputs["demand"] = d
+            if annual_d is not None:
+                inputs["demand"] = annual_d
+                if d_period and d_period != "year":
+                    inputs["stated_demand"] = raw_d
+                    inputs["demand_period"] = d_period
+                    inputs["demand_conversion_note"] = d_note
             else:
                 missing.append("demand (Annual Demand)")
 
@@ -486,8 +629,12 @@ class InputExtractor:
 
             if rate is not None:
                 inputs["holding_rate"] = rate
-            elif h is not None:
-                inputs["holding_cost"] = h
+            elif annual_h is not None:
+                inputs["holding_cost"] = annual_h
+                if h_period and h_period != "year":
+                    inputs["stated_holding_cost"] = raw_h
+                    inputs["holding_period"] = h_period
+                    inputs["holding_conversion_note"] = h_note
             else:
                 missing.append("holding_cost or holding_rate (Fixed holding cost or percentage holding cost)")
 
@@ -848,6 +995,10 @@ class ToolSelector:
                 unit_cost=inputs.get("unit_cost"),
                 holding_rate=inputs.get("holding_rate"),
                 working_days=inputs.get("working_days", 250),
+                stated_demand=inputs.get("stated_demand"),
+                demand_period=inputs.get("demand_period"),
+                stated_holding_cost=inputs.get("stated_holding_cost"),
+                holding_period=inputs.get("holding_period"),
             )
             return tool_name, result
 
@@ -858,6 +1009,8 @@ class ToolSelector:
                 discount_tiers=inputs["discount_tiers"],
                 holding_cost=inputs.get("holding_cost"),
                 holding_rate=inputs.get("holding_rate"),
+                stated_demand=inputs.get("stated_demand"),
+                demand_period=inputs.get("demand_period"),
             )
             return tool_name, result
 
@@ -923,6 +1076,10 @@ class Explainer:
             lines.append(f"- **Total Annual Inventory Cost**: **${res.annual_inventory_cost:,.2f}**")
             if res.annual_purchase_cost:
                 lines.append(f"- **Total Annual Cost (including purchase)**: **${res.total_annual_cost:,.2f}**")
+            if inputs.get("demand_conversion_note"):
+                lines.append(f"- **Demand Unit Conversion**: {inputs['demand_conversion_note']}")
+            if inputs.get("holding_conversion_note"):
+                lines.append(f"- **Holding Cost Conversion**: {inputs['holding_conversion_note']}")
             lines.append("")
             lines.append("### 1. Cost Breakdown & Economic Balance")
             lines.append(f"- **Annual Ordering Cost**: ${res.annual_ordering_cost:,.2f}  [Formula: (D / Q) × S = ({res.annual_demand:,.0f} / {res.optimal_order_quantity:.2f}) × ${res.order_cost:.2f}]")
@@ -942,6 +1099,10 @@ class Explainer:
             lines.append(f"- **Total Annual Cost**: **${res.total_annual_cost:,.2f}**")
             if res.cost_savings_vs_base > 0:
                 lines.append(f"- **Annual Cost Savings vs Base Tier**: **${res.cost_savings_vs_base:,.2f}**")
+            if inputs.get("demand_conversion_note"):
+                lines.append(f"- **Demand Unit Conversion**: {inputs['demand_conversion_note']}")
+            if inputs.get("holding_conversion_note"):
+                lines.append(f"- **Holding Cost Conversion**: {inputs['holding_conversion_note']}")
             lines.append("")
             lines.append("### 1. Tier Evaluation Comparison Table")
             lines.append("| Tier | Range (Units) | Unit Price | Unconstrained EOQ | Candidate Q | Feasible? | Total Annual Cost |")

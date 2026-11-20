@@ -802,3 +802,121 @@ class TestVerifiableCalculationOutputs:
         assert "7. Verification Checks" in expl
         assert "8. Assumptions" in expl
 
+
+# ===========================================================================
+# 7. Demand Unit Conversion & BAN 517 Test 6 Regression Tests
+# ===========================================================================
+
+class TestDemandUnitConversionRegression:
+    """
+    Automated regression tests verifying that sub-annual demand units
+    (day, week, month, quarter) are converted to annual demand
+    consistently with the annual holding-cost period before EOQ calculations.
+    """
+
+    def test_professor_report_generator_test6_monthly_demand_to_annual(self):
+        """
+        Exact BAN 517 Project Report Generator Test 6 prompt:
+        'Find EOQ. Demand is 1,000 units per month, ordering cost is $25 per order, and holding cost is $0.50 per unit per year.'
+        
+        Expected:
+            - Monthly demand: 1,000 units/month
+            - Annual demand D: 1,000 * 12 = 12,000 units/year
+            - Order cost S: $25.00
+            - Holding cost H: $0.50 per unit/year
+            - Optimal EOQ Q* = sqrt(2 * 12,000 * 25 / 0.50) = sqrt(1,200,000) approx 1,095.45 units
+            - Recommended integer Q: 1,095 or 1,096 units
+            - Annual orders = 12,000 / 1095.45 approx 10.95 orders/year
+            - Annual inventory cost = 2 * (1095.45 / 2 * 0.50) = $547.72
+        """
+        agent = InventoryDecisionAgent()
+        prompt = "Find EOQ. Demand is 1,000 units per month, ordering cost is $25 per order, and holding cost is $0.50 per unit per year."
+        resp = agent.ask(prompt)
+
+        assert resp.success is True, f"Agent failed on Test 6 prompt: {resp.missing_inputs}"
+        assert resp.identified_model == "eoq"
+
+        # Check extracted inputs
+        inputs = resp.extracted_inputs
+        assert inputs["demand"] == 12000.0, f"Expected annual demand 12,000, got {inputs['demand']}"
+        assert inputs["stated_demand"] == 1000.0, f"Expected stated demand 1,000, got {inputs.get('stated_demand')}"
+        assert inputs["demand_period"] == "month", f"Expected period 'month', got {inputs.get('demand_period')}"
+        assert inputs["order_cost"] == 25.0
+        assert inputs["holding_cost"] == 0.50
+
+        # Check calculation result
+        res: tools.EOQResult = resp.raw_result
+        assert res.annual_demand == 12000.0
+        assert pytest.approx(res.optimal_order_quantity, rel=1e-3) == 1095.445
+        assert res.recommended_order_quantity in [1095, 1096]
+        assert pytest.approx(res.orders_per_year, rel=1e-2) == 10.95
+        assert pytest.approx(res.annual_inventory_cost, rel=1e-2) == 547.72
+        assert pytest.approx(res.annual_ordering_cost, rel=1e-2) == 273.86
+        assert pytest.approx(res.annual_holding_cost, rel=1e-2) == 273.86
+
+        # Check formula and substitutions use annual demand 12,000
+        assert "12000" in res.formula_substituted
+        assert "25" in res.formula_substituted
+        assert "0.5" in res.formula_substituted
+
+        # Check verifiable step components include stated demand and conversion note
+        assert res.intermediate_calculations.get("stated_demand") == 1000.0
+        assert res.intermediate_calculations.get("demand_period") == "month"
+        assert any("1000" in a and "12000" in a for a in res.assumptions)
+        assert any("conversion check" in c.lower() for c in res.verification_checks)
+
+        # Check executive explanation reflects correct Q* and annual demand
+        assert "1,09" in resp.explanation  # matches 1,095 or 1,096
+        assert "547.72" in resp.explanation
+        assert "12,000" in resp.explanation
+
+    def test_daily_demand_conversion_to_annual(self):
+        """Tests that daily demand is annualized using working days (default 250)."""
+        agent = InventoryDecisionAgent()
+        prompt = "Find EOQ. Demand is 40 units per day, order cost is $50 per order, and holding cost is $2 per unit per year."
+        resp = agent.ask(prompt)
+
+        assert resp.success is True
+        # 40 units/day * 250 days = 10,000 units/year
+        assert resp.extracted_inputs["demand"] == 10000.0
+        assert resp.extracted_inputs["stated_demand"] == 40.0
+        assert resp.extracted_inputs["demand_period"] == "day"
+
+        res: tools.EOQResult = resp.raw_result
+        # Q* = sqrt(2 * 10000 * 50 / 2) = sqrt(500,000) approx 707.11
+        assert pytest.approx(res.optimal_order_quantity, rel=1e-3) == 707.11
+        assert res.recommended_order_quantity in [707, 708]
+
+    def test_weekly_demand_conversion_to_annual(self):
+        """Tests that weekly demand is annualized using 52 weeks/year."""
+        agent = InventoryDecisionAgent()
+        prompt = "Find EOQ. Demand is 200 units per week, order cost is $50 per order, and holding cost is $2 per unit per year."
+        resp = agent.ask(prompt)
+
+        assert resp.success is True
+        # 200 units/week * 52 weeks = 10,400 units/year
+        assert resp.extracted_inputs["demand"] == 10400.0
+        assert resp.extracted_inputs["stated_demand"] == 200.0
+        assert resp.extracted_inputs["demand_period"] == "week"
+
+        res: tools.EOQResult = resp.raw_result
+        # Q* = sqrt(2 * 10400 * 50 / 2) = sqrt(520,000) approx 721.11
+        assert pytest.approx(res.optimal_order_quantity, rel=1e-3) == 721.11
+
+    def test_quantity_discount_monthly_demand_conversion(self):
+        """Tests that monthly demand is annualized in the quantity discount model."""
+        agent = InventoryDecisionAgent()
+        prompt = (
+            "Demand is 500 units per month, ordering cost is $49, holding cost rate is 20%. "
+            "Tiers: 1-999: $5.00, 1000+: $4.80. What is optimal order quantity?"
+        )
+        resp = agent.ask(prompt)
+
+        assert resp.success is True
+        # 500 * 12 = 6,000 units/year
+        assert resp.extracted_inputs["demand"] == 6000.0
+        assert resp.extracted_inputs["stated_demand"] == 500.0
+        assert resp.extracted_inputs["demand_period"] == "month"
+        assert resp.raw_result.annual_demand == 6000.0
+
+

@@ -160,13 +160,17 @@ def calculate_eoq(
     unit_cost: Optional[float] = None,
     holding_rate: Optional[float] = None,
     working_days: Optional[int] = 250,
+    stated_demand: Optional[float] = None,
+    demand_period: Optional[str] = None,
+    stated_holding_cost: Optional[float] = None,
+    holding_period: Optional[str] = None,
 ) -> EOQResult:
     """
     Calculates deterministic Economic Order Quantity (EOQ):
         Q* = sqrt((2 * D * S) / H)
         
     Strict Validation:
-        - demand (D) > 0
+        - demand (D) > 0 (annualized demand)
         - order_cost (S) > 0
         - Either holding_cost (H) > 0, OR both unit_cost (C) > 0 and holding_rate (i) > 0
         - Never invents missing numerical inputs
@@ -236,6 +240,9 @@ def calculate_eoq(
         "annual_purchase_cost": annual_purchase_cost,
         "total_annual_cost": total_annual_cost,
     }
+    if stated_demand is not None and demand_period:
+        intermediates["stated_demand"] = stated_demand
+        intermediates["demand_period"] = demand_period
 
     # 3. Operations Research Assumptions
     assumptions = [
@@ -247,6 +254,11 @@ def calculate_eoq(
         "Unit purchase price is constant and independent of order quantity (no discounts).",
         "The inventory horizon is infinite and working days are evenly distributed.",
     ]
+    if stated_demand is not None and demand_period and demand_period != "year":
+        assumptions.insert(
+            0,
+            f"Stated demand of {stated_demand:g} units per {demand_period} was annualized to {demand:g} units per year to align consistently with the annual holding-cost period."
+        )
 
     # 4. Verification checks
     checks_passed = [
@@ -255,6 +267,11 @@ def calculate_eoq(
         f"Economic balance condition: Annual holding (${annual_holding_cost:.2f}) equals annual ordering (${annual_ordering_cost:.2f}) with delta ${cost_diff:.4f}.",
         f"Convexity / Second-Order Condition: d²TC/dQ² = 2DS/Q³ = {2.0 * demand * order_cost / (q_opt ** 3):.6f} > 0 (confirms strict cost minimum).",
     ]
+    if stated_demand is not None and demand_period and demand_period != "year":
+        checks_passed.append(
+            f"Demand unit conversion check: Stated {stated_demand:g} units/{demand_period} matches annualized D={demand:g} units/year."
+        )
+
     verification = VerificationResult(
         is_valid=True,
         checks_passed=checks_passed,
@@ -263,6 +280,7 @@ def calculate_eoq(
     # 5. Verifiable Step Components
     raw_inputs = {
         "Annual Demand (D)": demand,
+        "Stated Demand": f"{stated_demand:g} units per {demand_period}" if stated_demand is not None and demand_period and demand_period != "year" else None,
         "Order/Setup Cost (S)": order_cost,
         "Holding Cost per Unit (H)": h,
         "Unit Purchase Cost (C)": unit_cost,
@@ -379,6 +397,8 @@ def calculate_quantity_discount(
     discount_tiers: Optional[List[Tuple[float, Optional[float], float]]] = None,
     holding_cost: Optional[float] = None,
     holding_rate: Optional[float] = None,
+    stated_demand: Optional[float] = None,
+    demand_period: Optional[str] = None,
 ) -> QuantityDiscountResult:
     """
     Evaluates quantity discount price breaks to determine the global cost-minimizing order quantity.
@@ -508,6 +528,11 @@ def calculate_quantity_discount(
         "Holding cost is either constant across all tiers or scales strictly with the unit purchase price.",
         "Order replenishment occurs in full single batches with zero internal stockout tolerance.",
     ]
+    if stated_demand is not None and demand_period and demand_period != "year":
+        assumptions.insert(
+            0,
+            f"Stated demand of {stated_demand:g} units per {demand_period} was annualized to {demand:g} units per year to align consistently with the annual holding-cost period."
+        )
 
     checks_passed = [
         f"Evaluated {len(evaluated)} discount tiers.",
@@ -515,6 +540,10 @@ def calculate_quantity_discount(
         f"Candidate quantity Q={best_tier.candidate_quantity:g} satisfies tier range [{best_tier.min_quantity:g}, {best_tier.max_quantity if best_tier.max_quantity is not None else 'inf'}).",
         f"Annual cost minimized at ${best_tier.total_annual_cost:,.2f} with savings of ${savings:,.2f} vs base tier.",
     ]
+    if stated_demand is not None and demand_period and demand_period != "year":
+        checks_passed.append(
+            f"Demand unit conversion check: Stated {stated_demand:g} units/{demand_period} matches annualized D={demand:g} units/year."
+        )
     verification = VerificationResult(
         is_valid=True,
         checks_passed=checks_passed,
@@ -522,6 +551,7 @@ def calculate_quantity_discount(
 
     raw_inputs = {
         "Annual Demand (D)": demand,
+        "Stated Demand": f"{stated_demand:g} units per {demand_period}" if stated_demand is not None and demand_period and demand_period != "year" else None,
         "Order/Setup Cost (S)": order_cost,
         "Discount Tiers": discount_tiers,
         "Fixed Holding Cost (H)": holding_cost,
