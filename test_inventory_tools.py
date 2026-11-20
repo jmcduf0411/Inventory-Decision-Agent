@@ -920,3 +920,145 @@ class TestDemandUnitConversionRegression:
         assert resp.raw_result.annual_demand == 6000.0
 
 
+# ===========================================================================
+# 8. Safety Stock & Reorder Point Unit Conversion & BAN 517 Test 7 Regression
+# ===========================================================================
+
+class TestSafetyStockROPUnitConversionRegression:
+    """
+    Automated regression tests verifying that lead time in weeks and months
+    is converted to consistent working days with daily demand,
+    that decimal lead time standard deviations are extracted accurately,
+    and that variable demand and variable lead time (Case 4) are solved
+    using sigma_LT = sqrt(L * sigma_d^2 + d^2 * sigma_L^2).
+    """
+
+    def test_professor_report_generator_test7_variable_demand_variable_lead_time(self):
+        """
+        Exact BAN 517 Project Report Generator Test 7 prompt:
+        'A product has average demand of 40 units per day with a standard deviation of 8 units per day.
+         Average lead time is 3 weeks with a standard deviation of 0.5 weeks.
+         Determine the safety stock and reorder point for a 95% service level.'
+
+        Expected:
+            - Daily demand mean d: 40 units/day
+            - Daily demand std sigma_d: 8 units/day
+            - Stated lead time: 3 weeks -> Converted: 3 * 5 = 15 working days
+            - Stated lead time std: 0.5 weeks -> Converted: 0.5 * 5 = 2.5 working days
+            - Case: Case 4 (Variable demand, variable lead time)
+            - Expected lead time demand mu_L: 40 * 15 = 600 units
+            - Demand variance: 15 * 8^2 = 960
+            - Lead time variance: 40^2 * 2.5^2 = 1,600 * 6.25 = 10,000
+            - Combined std dev sigma_LT: sqrt(960 + 10,000) = sqrt(10,960) approx 104.68997 units
+            - Z (95% CSL): 1.64485
+            - Safety Stock SS: 1.64485 * 104.68997 approx 172.20 units (rounded up: 173 units)
+            - Reorder Point ROP: 600 + 172.20 approx 772.20 units (rounded up: 773 units)
+        """
+        agent = InventoryDecisionAgent()
+        prompt = (
+            "A product has average demand of 40 units per day with a standard deviation of 8 units per day. "
+            "Average lead time is 3 weeks with a standard deviation of 0.5 weeks. "
+            "Determine the safety stock and reorder point for a 95% service level."
+        )
+        resp = agent.ask(prompt)
+
+        assert resp.success is True, f"Agent failed on Test 7 prompt: {resp.missing_inputs}"
+        assert resp.identified_model == "safety_stock_rop"
+
+        # Check extracted inputs
+        inputs = resp.extracted_inputs
+        assert inputs["demand_mean"] == 40.0
+        assert inputs["demand_std"] == 8.0
+        assert inputs["demand_unit"] == "day"
+        assert inputs["stated_lead_time"] == 3.0
+        assert inputs["stated_lead_time_unit"] == "week"
+        assert inputs["stated_lead_time_std"] == 0.5
+        assert inputs["stated_lead_time_std_unit"] == "week"
+        assert inputs["lead_time"] == 15.0
+        assert inputs["lead_time_std"] == 2.5
+        assert inputs["service_level"] == 0.95
+
+        # Check calculation result
+        res: tools.SafetyStockROPResult = resp.raw_result
+        assert res.case_description == "Case 4: Variable Demand, Variable Lead Time"
+        assert res.has_variable_lead_time is True
+        assert res.daily_demand_mean == 40.0
+        assert res.daily_demand_std == 8.0
+        assert res.lead_time_days == 15.0
+        assert res.lead_time_std_days == 2.5
+        assert pytest.approx(res.lead_time_demand_mean, rel=1e-3) == 600.0
+        assert pytest.approx(res.demand_variance_component, rel=1e-3) == 960.0
+        assert pytest.approx(res.lead_time_variance_component, rel=1e-3) == 10000.0
+        assert pytest.approx(res.lead_time_demand_std, rel=1e-3) == 104.690
+
+        # Check Z and Service Level
+        assert pytest.approx(res.service_level, rel=1e-3) == 0.95
+        assert pytest.approx(res.z_score, rel=1e-3) == 1.6449
+
+        # Check Safety Stock and ROP (both exact float and integer ceiling)
+        assert pytest.approx(res.safety_stock, rel=1e-3) == 172.20
+        assert res.recommended_safety_stock == 173
+        assert pytest.approx(res.reorder_point, rel=1e-3) == 772.20
+        assert res.recommended_reorder_point == 773
+        assert res.final_answer == 773
+
+        # Check formula and substitutions
+        assert "sqrt(15 * (8)^2 + (40)^2 * (2.5)^2)" in res.formula_substituted
+        assert "104.6900" in res.formula_substituted
+        assert "172.20" in res.formula_substituted
+        assert "772.20" in res.formula_substituted
+
+        # Check verifiable step components include stated values and conversion note
+        assert res.intermediate_calculations.get("stated_lead_time") == 3.0
+        assert res.intermediate_calculations.get("stated_lead_time_unit") == "week"
+        assert res.intermediate_calculations.get("effective_lead_time_days") == 15.0
+        assert res.intermediate_calculations.get("stated_lead_time_std") == 0.5
+        assert res.intermediate_calculations.get("effective_lead_time_std_days") == 2.5
+        assert any("3 weeks" in a and "15" in a for a in res.assumptions)
+        assert any("conversion verified" in c.lower() for c in res.verification_checks)
+
+        # Check executive explanation reflects correct SS and ROP
+        assert "173" in resp.explanation
+        assert "773" in resp.explanation
+        assert "172.20" in resp.explanation
+        assert "772.20" in resp.explanation
+
+    def test_constant_lead_time_in_weeks_conversion(self):
+        """Tests that constant lead time in weeks is converted to days without variability."""
+        agent = InventoryDecisionAgent()
+        prompt = (
+            "Average daily demand is 50 units with standard deviation of 10 units. "
+            "Lead time is 2 weeks (constant). 95% service level."
+        )
+        resp = agent.ask(prompt)
+
+        assert resp.success is True
+        # 2 weeks * 5 days/week = 10 days
+        assert resp.extracted_inputs["lead_time"] == 10.0
+        assert resp.extracted_inputs["lead_time_std"] == 0.0
+        assert resp.raw_result.case_description == "Case 2: Variable Demand, Constant Lead Time"
+        # mu_L = 50 * 10 = 500, sigma_LT = 10 * sqrt(10) = 31.62277
+        assert pytest.approx(resp.raw_result.lead_time_demand_mean, rel=1e-3) == 500.0
+        assert pytest.approx(resp.raw_result.lead_time_demand_std, rel=1e-3) == 31.623
+        # SS = 1.6449 * 31.623 = 52.01 -> 53 units
+        assert pytest.approx(resp.raw_result.safety_stock, rel=1e-2) == 52.01
+        assert resp.raw_result.recommended_safety_stock in [52, 53]
+
+    def test_lead_time_in_months_conversion(self):
+        """Tests that lead time specified in months is converted to working days."""
+        agent = InventoryDecisionAgent()
+        prompt = (
+            "Daily demand is 20 units with standard deviation of 4 units. "
+            "Supplier lead time is 1 month with standard deviation of 0.2 months. 95% service level."
+        )
+        resp = agent.ask(prompt)
+
+        assert resp.success is True
+        # 250 / 12 = 20.8333 working days/month
+        expected_days = 250.0 / 12.0
+        assert pytest.approx(resp.extracted_inputs["lead_time"], rel=1e-3) == expected_days
+        assert pytest.approx(resp.extracted_inputs["lead_time_std"], rel=1e-3) == 0.2 * expected_days
+        assert resp.raw_result.case_description == "Case 4: Variable Demand, Variable Lead Time"
+
+
+

@@ -664,6 +664,11 @@ def calculate_rop(
     lead_time_std: Optional[float] = 0.0,
     service_level: Optional[float] = None,
     z: Optional[float] = None,
+    stated_lead_time: Optional[float] = None,
+    stated_lead_time_unit: Optional[str] = None,
+    stated_lead_time_std: Optional[float] = None,
+    stated_lead_time_std_unit: Optional[str] = None,
+    demand_unit: Optional[str] = "day",
 ) -> ROPResult:
     """
     Calculates deterministic Safety Stock and Reorder Point (ROP).
@@ -808,6 +813,14 @@ def calculate_rop(
         "exact_safety_stock (SS)": ss,
         "exact_reorder_point (ROP)": rop,
     }
+    if stated_lead_time is not None and stated_lead_time_unit and stated_lead_time_unit != "day":
+        intermediates["stated_lead_time"] = stated_lead_time
+        intermediates["stated_lead_time_unit"] = stated_lead_time_unit
+        intermediates["effective_lead_time_days"] = lead_time
+        if stated_lead_time_std is not None and stated_lead_time_std > 0:
+            intermediates["stated_lead_time_std"] = stated_lead_time_std
+            intermediates["stated_lead_time_std_unit"] = stated_lead_time_std_unit or stated_lead_time_unit
+            intermediates["effective_lead_time_std_days"] = sigma_l
 
     all_assumptions = [
         "Continuous review policy (s, Q): inventory position is monitored continuously.",
@@ -815,6 +828,11 @@ def calculate_rop(
         "Cycle service level represents the probability that demand during lead time does not exceed the reorder point.",
         "Unfilled customer demand during stockout is fully backordered.",
     ] + case_assumptions
+    if stated_lead_time is not None and stated_lead_time_unit and stated_lead_time_unit != "day":
+        all_assumptions.insert(
+            0,
+            f"Stated lead time of {stated_lead_time:g} {stated_lead_time_unit}s was converted to {lead_time:g} working days (5 working days per week) to align consistently with daily demand."
+        )
 
     checks_passed = [
         f"Identified {case_name}.",
@@ -823,6 +841,15 @@ def calculate_rop(
         f"Safety stock = {rec_ss} units for CSL = {csl*100:.1f}% (Z={z_score:.4f}).",
         f"Reorder point = {rec_rop} units (ROP >= Mean lead time demand of {mu_l:.2f}).",
     ]
+    if stated_lead_time is not None and stated_lead_time_unit and stated_lead_time_unit != "day":
+        checks_passed.append(
+            f"Lead time unit conversion verified: Stated {stated_lead_time:g} {stated_lead_time_unit}s converted to {lead_time:g} working days (5 working days/week)."
+        )
+        if stated_lead_time_std is not None and stated_lead_time_std > 0:
+            checks_passed.append(
+                f"Lead time std dev conversion verified: Stated {stated_lead_time_std:g} {stated_lead_time_std_unit or stated_lead_time_unit}s converted to {sigma_l:g} days."
+            )
+
     verification = VerificationResult(
         is_valid=True,
         checks_passed=checks_passed,
@@ -831,8 +858,10 @@ def calculate_rop(
     raw_inputs = {
         "Average Demand (d)": demand_mean,
         "Supplier Lead Time (L)": lead_time,
+        "Stated Lead Time": f"{stated_lead_time:g} {stated_lead_time_unit}s" if stated_lead_time is not None and stated_lead_time_unit and stated_lead_time_unit != "day" else None,
         "Demand Std Dev (sigma_d)": sigma_d,
         "Lead Time Std Dev (sigma_L)": sigma_l,
+        "Stated Lead Time Std Dev": f"{stated_lead_time_std:g} {stated_lead_time_std_unit or stated_lead_time_unit}s" if stated_lead_time_std is not None and stated_lead_time_std > 0 and stated_lead_time_std_unit and stated_lead_time_std_unit != "day" else None,
         "Cycle Service Level (CSL)": csl if has_variability else None,
         "Z-Score (z)": z_score if has_variability else None,
     }

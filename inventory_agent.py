@@ -75,8 +75,8 @@ class ModelIdentifier:
         ],
         "safety_stock_rop": [
             "safety stock", "reorder point", "rop", "continuous review", "r, q",
-            "(r,q)", "cycle service level", "lead time demand", "stockout risk",
-            "stock out", "z-score", "buffer stock"
+            "(r,q)", "service level", "cycle service level", "lead time demand", "stockout risk",
+            "stock out", "z-score", "buffer stock", "lead time standard deviation", "lead time std dev"
         ],
         "eoq": [
             "eoq", "economic order quantity", "annual demand", "order cost",
@@ -650,87 +650,193 @@ class InputExtractor:
         # MODEL 3: SAFETY STOCK & REORDER POINT
         # =====================================================================
         elif model_key == "safety_stock_rop":
-            # Distinguish:
-            # 1. Lead-time standard deviation (FIRST before average lead time)
-            lt_std = cls.extract_numbers_after(question, [
-                r'(?:lead[\s-]time\s+standard\s+deviation|standard\s+deviation\s+of\s+lead[\s-]time|lead[\s-]time\s+std\s*dev|std\s*dev\s+of\s+lead[\s-]time|lead[\s-]time\s+variability|sigma_L|sigma\s+l)\s*(?:is|of|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'lead[\s-]time(?:\s+\w+){0,3}\s+(?:standard\s+deviation|std\s*dev)\s*(?:is|of|[:=])?\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'lead_time_std[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
+            w = cls.extract_numbers_after(question, [
+                r'([0-9]+)\s*(?:working\s+days|operating\s+days|days\s+per\s+year|days\s+a\s+year)',
+                r'working_days[:=]\s*([0-9]+)',
             ])
+            working_days_val = int(w) if w else 250
 
-            # 2. Average lead time L
-            lt = cls.extract_numbers_after(question, [
-                r'(?:average\s+lead[\s-]time|mean\s+lead[\s-]time|supplier\s+lead[\s-]time|replenishment\s+lead[\s-]time|lead[\s-]time)\s*(?:is|of|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?)\s*(?:days?|weeks?|periods?)?',
-                r'takes\s*([0-9,]+(?:\.[0-9]+)?)\s*(?:days?|weeks?)\s*(?:to\s+(?:arrive|deliver|replenish)|lead[\s-]time)?',
-                r'([0-9,]+(?:\.[0-9]+)?)\s*(?:days?|weeks?)\s*(?:supplier\s+)?lead[\s-]time',
-                r'lead_time[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'\b[lL]\s*[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
-            ])
+            # -------------------------------------------------------------
+            # 1. Lead Time L and Lead Time Std Dev sigma_L (with period recognition)
+            # -------------------------------------------------------------
+            lt, lt_unit, lt_std, lt_std_unit = None, None, None, None
 
-            # 3. Demand standard deviation (FIRST before average demand)
-            d_std = cls.extract_numbers_after(question, [
-                r'(?:standard\s+deviation\s+of\s+(?:daily\s+)?demand|demand\s+standard\s+deviation|demand\s+std\s*dev|std\s*dev\s+of\s+(?:daily\s+)?demand|daily\s+demand\s+std\s*dev|demand\s+variability|sigma_d|sigma\s+d)\s*(?:is|of|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'with\s+(?:a\s+)?(?:standard\s+deviation|std\s*dev)(?:\s+of)?\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'(?:std\s*dev|standard\s+deviation)\s*(?:is|of|[:=])\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'demand_std[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
-            ])
+            # Combined lead time pattern: e.g. "average lead time is 3 weeks with a standard deviation of 0.5 weeks"
+            comb_lt = re.search(
+                r'(?:average\s+lead[\s-]time|mean\s+lead[\s-]time|supplier\s+lead[\s-]time|replenishment\s+lead[\s-]time|lead[\s-]time)\s*(?:is|averages?|of|takes|[:=])?\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(days?|weeks?|months?)?\s*(?:with\s+(?:a\s+)?)?(?:standard\s+deviation|std\s*dev)\s*(?:of|is|[:=])?\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(days?|weeks?|months?)?',
+                question, re.IGNORECASE
+            )
+            if comb_lt:
+                lt = float(comb_lt.group(1).replace(",", ""))
+                lt_unit = cls.parse_time_period(comb_lt.group(2)) if comb_lt.group(2) else None
+                lt_std = float(comb_lt.group(3).replace(",", ""))
+                lt_std_unit = cls.parse_time_period(comb_lt.group(4)) if comb_lt.group(4) else lt_unit
+            else:
+                # Separate lead time std dev
+                lt_std_pats = [
+                    r'(?:standard\s+deviation\s+of\s+(?:the\s+)?lead[\s-]time|lead[\s-]time\s+standard\s+deviation|lead[\s-]time\s+std\s*dev|std\s*dev\s+of\s+(?:the\s+)?lead[\s-]time|lead[\s-]time\s+variability|sigma_L|sigma\s+l)\s*(?:is|of|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(days?|weeks?|months?)?',
+                    r'lead[\s-]time(?:\s+\w+){0,6}\s+(?:standard\s+deviation|std\s*dev)\s*(?:is|of|[:=])?\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(days?|weeks?|months?)?',
+                    r'lead_time_std[:=]\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(days?|weeks?|months?)?',
+                ]
+                for pat in lt_std_pats:
+                    m = re.search(pat, question, re.IGNORECASE)
+                    if m:
+                        lt_std = float(m.group(1).replace(",", ""))
+                        lt_std_unit = cls.parse_time_period(m.group(2)) if (m.lastindex and m.lastindex >= 2 and m.group(2)) else None
+                        break
 
-            # 4. Average demand d
-            d_mean = cls.extract_numbers_after(question, [
-                r'(?:average\s+(?:daily\s+)?demand|mean\s+(?:daily\s+)?demand|daily\s+demand\s+mean|expected\s+(?:daily\s+)?demand|daily\s+demand|average\s+demand|mean\s+demand)\s*(?:is|of|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'demand\s+(?:averages|is)\s*([0-9,]+(?:\.[0-9]+)?)\s*(?:units\s+per\s+day|units/day|per\s+day)?',
-                r'([0-9,]+(?:\.[0-9]+)?)\s*(?:units\s+per\s+day|units/day)\s*(?:demand|average)?',
-                r'demand_mean[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
-                r'\b[dD]\s*[:=]\s*([0-9,]+(?:\.[0-9]+)?)',
-            ])
+                # Separate lead time mean
+                lt_pats = [
+                    r'(?:average\s+lead[\s-]time|mean\s+lead[\s-]time|supplier\s+lead[\s-]time|replenishment\s+lead[\s-]time|lead[\s-]time)\s*(?:is|of|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(days?|weeks?|months?)?',
+                    r'takes\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(days?|weeks?|months?)\s*(?:to\s+(?:arrive|deliver|replenish)|lead[\s-]time)?',
+                    r'([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(days?|weeks?|months?)\s*(?:supplier\s+)?lead[\s-]time',
+                    r'lead_time[:=]\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(days?|weeks?|months?)?',
+                    r'\b[lL]\s*[:=]\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(days?|weeks?|months?)?',
+                ]
+                for pat in lt_pats:
+                    m = re.search(pat, question, re.IGNORECASE)
+                    if m:
+                        lt = float(m.group(1).replace(",", ""))
+                        lt_unit = cls.parse_time_period(m.group(2)) if (m.lastindex and m.lastindex >= 2 and m.group(2)) else None
+                        break
 
-            # 5. Service level CSL or Z
-            csl = cls.extract_percentage(question, [
-                r'(?:cycle\s+)?service\s+level\s*(?:is|of|[:=]|about)?\s*([0-9.]+)\s*%?',
-                r'([0-9.]+)\s*%\s*(?:cycle\s+)?service\s+level',
-                r'(?:in[\s-]stock\s+probability|target\s+service\s+level|desired\s+service\s+level)\s*(?:is|of|[:=]|about)?\s*([0-9.]+)\s*%?',
-                r'service_level[:=]\s*([0-9.]+)',
-            ])
-            z_val = cls.extract_numbers_after(question, [
-                r'\b[zZ]\s*(?:score)?\s*[:=]\s*([0-9.]+)',
-            ])
+            # -------------------------------------------------------------
+            # 2. Demand Mean d and Demand Std Dev sigma_d
+            # -------------------------------------------------------------
+            d_mean, d_unit, d_std, d_std_unit = None, None, None, None
 
-            # Clause-level fallback for demand_std and demand_mean if still missing
-            if d_mean is None or d_std is None:
+            # Combined demand pattern: e.g. "average demand of 40 units per day with a standard deviation of 8 units per day"
+            comb_d = re.search(
+                r'(?:average\s+(?:daily\s+)?demand|mean\s+(?:daily\s+)?demand|daily\s+demand\s+mean|expected\s+(?:daily\s+)?demand|daily\s+demand|average\s+demand|mean\s+demand|demand)\s*(?:is|averages?|of|[:=])?\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(?:units)?\s*(?:per|/|each|a)?\s*(day|week|month|year)?\s*(?:with\s+(?:a\s+)?)?(?:standard\s+deviation|std\s*dev)\s*(?:of|is|[:=])?\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(?:units)?\s*(?:per|/|each|a)?\s*(day|week|month|year)?',
+                question, re.IGNORECASE
+            )
+            if comb_d:
+                d_mean = float(comb_d.group(1).replace(",", ""))
+                d_unit = cls.parse_time_period(comb_d.group(2)) if comb_d.group(2) else None
+                d_std = float(comb_d.group(3).replace(",", ""))
+                d_std_unit = cls.parse_time_period(comb_d.group(4)) if comb_d.group(4) else d_unit
+            else:
+                # Separate demand std
+                d_std_pats = [
+                    r'(?:standard\s+deviation\s+of\s+(?:daily\s+)?demand|demand\s+standard\s+deviation|demand\s+std\s*dev|std\s*dev\s+of\s+(?:daily\s+)?demand|daily\s+demand\s+std\s*dev|demand\s+variability|sigma_d|sigma\s+d)\s*(?:is|of|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(?:units)?\s*(?:per|/|each|a)?\s*(day|week|month|year)?',
+                    r'with\s+(?:a\s+)?(?:standard\s+deviation|std\s*dev)(?:\s+of)?\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(?:units)?\s*(?:per|/|each|a)?\s*(day|week|month|year)?',
+                    r'demand_std[:=]\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(?:units)?\s*(?:per|/|each|a)?\s*(day|week|month|year)?',
+                ]
+                for pat in d_std_pats:
+                    m = re.search(pat, question, re.IGNORECASE)
+                    if m:
+                        d_std = float(m.group(1).replace(",", ""))
+                        d_std_unit = cls.parse_time_period(m.group(2)) if (m.lastindex and m.lastindex >= 2 and m.group(2)) else None
+                        break
+
+                # Separate demand mean
+                d_pats = [
+                    r'(?:average\s+(?:daily\s+)?demand|mean\s+(?:daily\s+)?demand|daily\s+demand\s+mean|expected\s+(?:daily\s+)?demand|daily\s+demand|average\s+demand|mean\s+demand)\s*(?:is|of|[:=]|about)?\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(?:units)?\s*(?:per|/|each|a)?\s*(day|week|month|year)?',
+                    r'demand\s+(?:averages|is)\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(?:units\s+per\s+day|units/day|per\s+day|units\s+per\s+week|units/week|per\s+week)?',
+                    r'([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)\s*(?:units\s+per\s+day|units/day)\s*(?:demand|average)?',
+                    r'demand_mean[:=]\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)',
+                    r'\b[dD]\s*[:=]\s*([0-9,]+(?:\.[0-9]+)?|\.[0-9]+)',
+                ]
+                for pat in d_pats:
+                    m = re.search(pat, question, re.IGNORECASE)
+                    if m:
+                        d_mean = float(m.group(1).replace(",", ""))
+                        d_unit = cls.parse_time_period(m.group(2)) if (m.lastindex and m.lastindex >= 2 and m.group(2)) else None
+                        break
+
+            # Fallback for demand in clauses
+            if d_mean is None or (d_std is None and "constant" not in question.lower() and "(constant)" not in question.lower()):
                 for clause in re.split(r'[,;.\n]|\band\b', question, flags=re.IGNORECASE):
                     c_low = clause.lower()
+                    if any(w in c_low for w in ["lead time", "lead-time", "supplier", "review", "arrive", "service level"]):
+                        continue
                     if ("std" in c_low or "deviation" in c_low) and d_std is None:
                         nums = cls.find_all_numbers(clause)
                         if nums:
                             d_std = nums[0]
-                    elif ("demand" in c_low or "daily" in c_low) and d_mean is None:
+                    elif "demand" in c_low and d_mean is None:
                         nums = cls.find_all_numbers(clause)
                         if nums:
                             d_mean = nums[0]
+
+            # -------------------------------------------------------------
+            # 3. Service Level CSL or Z
+            # -------------------------------------------------------------
+            csl = cls.extract_percentage(question, [
+                r'(?:cycle\s+)?service\s+level\s*(?:is|of|[:=]|about)?\s*([0-9]+(?:\.[0-9]+)?)\s*%?',
+                r'([0-9]+(?:\.[0-9]+)?)\s*%\s*(?:cycle\s+)?service\s+level',
+                r'(?:in[\s-]stock\s+probability|target\s+service\s+level|desired\s+service\s+level)\s*(?:is|of|[:=]|about)?\s*([0-9]+(?:\.[0-9]+)?)\s*%?',
+                r'service_level[:=]\s*([0-9]+(?:\.[0-9]+)?)',
+            ])
+            z_val = cls.extract_numbers_after(question, [
+                r'\b[zZ]\s*(?:score)?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)',
+            ])
+
+            # -------------------------------------------------------------
+            # 4. Consistent Time Unit Conversion (Lead time -> Demand period)
+            # -------------------------------------------------------------
+            base_unit = d_unit or "day"
+            days_per_week = 5.0
+            days_per_month = float(working_days_val) / 12.0
+
+            lt_mult = 1.0
+            if lt_unit == "week":
+                lt_mult = days_per_week
+            elif lt_unit == "month":
+                lt_mult = days_per_month
+
+            lt_std_mult = 1.0
+            actual_lt_std_unit = lt_std_unit or lt_unit
+            if actual_lt_std_unit == "week":
+                lt_std_mult = days_per_week
+            elif actual_lt_std_unit == "month":
+                lt_std_mult = days_per_month
+
+            effective_lt = (lt * lt_mult) if lt is not None else None
+            effective_lt_std = (lt_std * lt_std_mult) if lt_std is not None else 0.0
+
+            conversion_note = None
+            if lt_unit and lt_unit != "day":
+                conversion_note = (
+                    f"Stated lead time of {lt:g} {lt_unit}s converted to {effective_lt:g} days "
+                    f"({lt:g} × {days_per_week:g} working days/week)."
+                )
+                if lt_std is not None and lt_std > 0 and actual_lt_std_unit != "day":
+                    conversion_note += (
+                        f" Lead time std dev converted from {lt_std:g} {actual_lt_std_unit}s to {effective_lt_std:g} days "
+                        f"({lt_std:g} × {days_per_week:g} working days/week)."
+                    )
 
             if d_mean is not None:
                 inputs["demand_mean"] = d_mean
             else:
                 missing.append("demand_mean (Average demand d)")
 
-            # demand_std is optional (0 for constant demand), but if text has variability we record it
             inputs["demand_std"] = d_std if d_std is not None else 0.0
+            inputs["demand_unit"] = base_unit
 
-            if lt is not None:
-                inputs["lead_time"] = lt
+            if effective_lt is not None:
+                inputs["lead_time"] = effective_lt
             else:
                 missing.append("lead_time (Average lead time L)")
 
-            inputs["lead_time_std"] = lt_std if lt_std is not None else 0.0
+            inputs["lead_time_std"] = effective_lt_std
+
+            if lt_unit and lt_unit != "day":
+                inputs["stated_lead_time"] = lt
+                inputs["stated_lead_time_unit"] = lt_unit
+                if lt_std is not None and lt_std > 0:
+                    inputs["stated_lead_time_std"] = lt_std
+                    inputs["stated_lead_time_std_unit"] = actual_lt_std_unit
+                inputs["conversion_note"] = conversion_note
 
             if csl is not None:
                 inputs["service_level"] = csl
             elif z_val is not None:
                 inputs["z"] = z_val
             else:
-                # If variability exists, service level is needed
                 if inputs["demand_std"] > 0 or inputs["lead_time_std"] > 0:
-                    inputs["service_level"] = 0.95  # Default 95% if not stated
+                    inputs["service_level"] = 0.95
                 else:
                     inputs["service_level"] = 1.0
 
@@ -1021,6 +1127,12 @@ class ToolSelector:
                 lead_time=inputs["lead_time"],
                 service_level=inputs.get("service_level", 0.95),
                 lead_time_std=inputs.get("lead_time_std", 0.0),
+                z=inputs.get("z"),
+                stated_lead_time=inputs.get("stated_lead_time"),
+                stated_lead_time_unit=inputs.get("stated_lead_time_unit"),
+                stated_lead_time_std=inputs.get("stated_lead_time_std"),
+                stated_lead_time_std_unit=inputs.get("stated_lead_time_std_unit"),
+                demand_unit=inputs.get("demand_unit", "day"),
             )
             return tool_name, result
 
@@ -1129,14 +1241,18 @@ class Explainer:
             lines.append(f"- **Recommended Safety Stock (SS)**: **{res.recommended_safety_stock:,} units** ({res.safety_stock:.2f} exact)")
             lines.append(f"- **Recommended Reorder Point (ROP)**: **{res.recommended_reorder_point:,} units** ({res.reorder_point:.2f} exact)")
             lines.append(f"- **Target Cycle Service Level**: **{res.service_level * 100:.1f}%** (Stockout risk: {res.stockout_risk * 100:.1f}%)")
+            if inputs.get("conversion_note"):
+                lines.append(f"- **Lead Time Unit Conversion**: {inputs['conversion_note']}")
             lines.append("")
-            lines.append("### 1. Statistical Breakdown")
+            lines.append(f"### 1. Statistical Breakdown ({res.case_description})")
             lines.append(f"- **Normal Z-Score**: {res.z_score:.4f} standard deviations")
-            lines.append(f"- **Expected Lead Time Demand (μ_L)**: {res.lead_time_demand_mean:,.2f} units [Formula: daily_demand × lead_time = {res.daily_demand_mean} × {res.lead_time_days}]")
-            lines.append(f"- **Lead Time Demand Std Dev (σ_L)**: {res.lead_time_demand_std:.2f} units")
+            lines.append(f"- **Expected Lead Time Demand (μ_L)**: {res.lead_time_demand_mean:,.2f} units [Formula: d × L = {res.daily_demand_mean:g} × {res.lead_time_days:g}]")
+            lines.append(f"- **Lead Time Demand Std Dev (σ_LT)**: {res.lead_time_demand_std:.2f} units")
             if res.has_variable_lead_time:
-                lines.append(f"- *Note*: Accounts for lead time uncertainty with lead time std dev = {res.lead_time_std_days:.1f} days.")
-            lines.append(f"- **Safety Stock Calculation**: SS = Z × σ_L = {res.z_score:.4f} × {res.lead_time_demand_std:.2f} = {res.safety_stock:.2f} units")
+                lines.append(f"- *Note*: Accounts for lead time uncertainty with lead time std dev = {res.lead_time_std_days:g} days.")
+                lines.append(f"- **Demand Variance Component**: L × σ_d² = {res.lead_time_days:g} × {res.daily_demand_std:g}² = {res.demand_variance_component:,.2f}")
+                lines.append(f"- **Lead Time Variance Component**: d² × σ_L² = {res.daily_demand_mean:g}² × {res.lead_time_std_days:g}² = {res.lead_time_variance_component:,.2f}")
+            lines.append(f"- **Safety Stock Calculation**: SS = Z × σ_LT = {res.z_score:.4f} × {res.lead_time_demand_std:.2f} = {res.safety_stock:.2f} units")
             lines.append(f"- **Reorder Point Calculation**: ROP = μ_L + SS = {res.lead_time_demand_mean:.2f} + {res.safety_stock:.2f} = {res.reorder_point:.2f} units")
             lines.append("")
             lines.append("### 2. Operational Rule")
